@@ -30,7 +30,8 @@ jobs:
 
       - name: Sign APK
         id: sign_app
-        if: success()
+        # Only run if the secret is present to avoid failure on missing secrets
+        if: success() && secrets.SIGNING_KEY != null
         uses: r0adkll/sign-android-release@v1
         with:
           releaseDirectory: app/build/outputs/apk/release
@@ -38,16 +39,19 @@ jobs:
           alias: ${{ secrets.ALIAS }}
           keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
           keyPassword: ${{ secrets.KEY_PASSWORD }}
+          # Use a version that exists on the runner
+          buildToolsVersion: "34.0.0"
 
       - name: Upload Signed APK
         uses: actions/upload-artifact@v4
+        if: success() && steps.sign_app.outputs.signedReleaseFile != ''
         with:
           name: release-apk-signed
           path: ${{ steps.sign_app.outputs.signedReleaseFile }}
 
       # Fallback if signing is not configured (will upload unsigned if secrets missing)
       - name: Upload Unsigned APK (Alternative)
-        if: failure() || steps.sign_app.outputs.signedReleaseFile == ''
+        if: always() && (steps.sign_app.outcome == 'skipped' || steps.sign_app.outputs.signedReleaseFile == '')
         uses: actions/upload-artifact@v4
         with:
           name: release-apk-unsigned
