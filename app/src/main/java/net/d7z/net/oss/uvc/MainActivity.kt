@@ -260,8 +260,18 @@ class MainActivity : AppCompatActivity() {
             binding.btnStreamToggle.isEnabled = false
             binding.btnStreamToggle.text = getString(R.string.start_streaming)
             binding.tvPreviewOffHint.visibility = View.GONE
+            binding.actvDevices.setText(getString(R.string.no_uvc_device), false)
         } else {
             processConnectedDevices(devices)
+            
+            // Auto-selection if empty or selection vanished
+            val current = currentDevice
+            if (current == null || devices.none { it.deviceName == current.deviceName }) {
+                openDevice(devices[0])
+            } else {
+                // Update text to show any session ID changes
+                updateDropdownText(current)
+            }
         }
     }
 
@@ -289,6 +299,7 @@ class MainActivity : AppCompatActivity() {
     private fun openDevice(device: UsbDevice) {
         currentDevice = device
         logToUI("User selected device: ${device.deviceName}")
+        updateDropdownText(device)
         val session = uvcService?.sessionsByFd?.values?.find { it.device.deviceName == device.deviceName }
         if (session != null) {
             logToUI("Restoring UI for existing session Cam ${session.index}")
@@ -308,8 +319,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun updateDropdownText(device: UsbDevice) {
+        val session = uvcService?.sessionsByFd?.values?.find { it.device.deviceName == device.deviceName }
+        val shortPath = device.deviceName.takeLast(7)
+        val displayName = if (session != null) {
+            getString(R.string.usb_status_cam_index, session.index, (device.productName ?: "Camera")) + " [$shortPath]"
+        } else {
+            (device.productName ?: "Camera") + " [$shortPath]"
+        }
+        binding.actvDevices.setText(displayName, false)
+    }
+
     private fun restoreCameraUI(session: UvcStreamingService.CameraSession) {
         binding.ivPreview.setImageResource(0)
+        updateDropdownText(session.device)
         binding.tvCameraId.visibility = View.VISIBLE
         binding.tvCameraId.text = "ID: ${session.index}"
         binding.tvUsbStatus.text = getString(R.string.usb_status_cam_index, session.index, session.device.productName ?: "")
