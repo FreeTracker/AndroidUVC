@@ -25,20 +25,25 @@
             app:titleTextAppearance="@style/TextAppearance.Material3.TitleLarge" />
     </com.google.android.material.appbar.AppBarLayout>
 
-    <LinearLayout
+    <!-- Main Container: Refactored to ConstraintLayout for stable split -->
+    <androidx.constraintlayout.widget.ConstraintLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:orientation="horizontal"
-        android:padding="16dp"
+        android:padding="12dp"
         app:layout_behavior="@string/appbar_scrolling_view_behavior">
 
-        <!-- LEFT COLUMN: Status and Controls -->
+        <!-- LEFT COLUMN: Status and Controls (1/3 width) -->
         <LinearLayout
+            android:id="@+id/left_column_container"
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_weight="1"
             android:orientation="vertical"
-            android:paddingEnd="8dp">
+            android:paddingEnd="6dp"
+            app:layout_constraintHorizontal_weight="1"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toStartOf="@+id/right_column_container"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintBottom_toBottomOf="parent">
 
             <!-- DASHBOARD CARD -->
             <com.google.android.material.card.MaterialCardView
@@ -62,7 +67,9 @@
                         android:padding="12dp"
                         app:flexWrap="wrap"
                         app:justifyContent="space_around"
-                        app:alignItems="center">
+                        app:alignItems="center"
+                        app:dividerDrawable="@drawable/bg_preview_label"
+                        app:showDivider="middle">
 
                         <LinearLayout
                             android:layout_width="wrap_content"
@@ -155,7 +162,7 @@
                 android:id="@+id/cv_control"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
+                android:layout_marginTop="12dp"
                 app:cardCornerRadius="16dp"
                 app:cardElevation="0dp"
                 app:strokeWidth="1dp"
@@ -165,7 +172,7 @@
                 <com.google.android.flexbox.FlexboxLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:padding="16dp"
+                    android:padding="12dp"
                     app:flexWrap="wrap"
                     app:alignItems="center">
 
@@ -175,7 +182,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:hint="Select Camera"
-                        android:layout_marginBottom="12dp">
+                        android:layout_marginBottom="8dp">
                         <AutoCompleteTextView
                             android:id="@+id/actv_devices"
                             android:layout_width="match_parent"
@@ -191,14 +198,15 @@
                         android:hint="Resolution"
                         android:visibility="gone"
                         tools:visibility="visible"
-                        android:layout_marginEnd="8dp"
+                        android:layout_marginEnd="4dp"
                         app:layout_flexGrow="1"
-                        app:layout_minWidth="140dp">
+                        app:layout_minWidth="120dp">
                         <AutoCompleteTextView
                             android:id="@+id/actv_resolution"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:inputType="none" />
+                            android:inputType="none"
+                            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <com.google.android.material.textfield.TextInputLayout
@@ -210,19 +218,20 @@
                         android:visibility="gone"
                         tools:visibility="visible"
                         app:layout_flexGrow="1"
-                        app:layout_minWidth="100dp">
+                        app:layout_minWidth="80dp">
                         <AutoCompleteTextView
                             android:id="@+id/actv_fps"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:inputType="none" />
+                            android:inputType="none"
+                            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <com.google.android.material.materialswitch.MaterialSwitch
                         android:id="@+id/sw_preview"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
+                        android:layout_marginTop="8dp"
                         android:text="Preview"
                         app:layout_flexBasisPercent="100%" />
 
@@ -230,7 +239,7 @@
                         android:id="@+id/btn_stream_toggle"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
+                        android:layout_marginTop="8dp"
                         android:text="Start Stream" />
 
                     <com.google.android.material.textfield.TextInputLayout
@@ -238,13 +247,14 @@
                         style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
+                        android:layout_marginTop="8dp"
                         android:hint="HTTP Port">
                         <com.google.android.material.textfield.TextInputEditText
                             android:id="@+id/et_http_port"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:inputType="number" />
+                            android:inputType="number"
+                            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
                     </com.google.android.material.textfield.TextInputLayout>
                     
                     <com.google.android.material.button.MaterialButton
@@ -259,12 +269,11 @@
                         android:id="@+id/tv_usb_status"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
+                        android:layout_marginTop="4dp"
                         android:textAppearance="@style/TextAppearance.Material3.LabelSmall"
                         android:textColor="?attr/colorError"
                         tools:text="USB Status: Not Connected" />
                     
-                    <!-- HIDDEN but kept for binding compatibility if needed -->
                     <TextView
                         android:id="@+id/tv_camera_id"
                         android:layout_width="0dp"
@@ -275,13 +284,18 @@
             </com.google.android.material.card.MaterialCardView>
         </LinearLayout>
 
-        <!-- RIGHT COLUMN: Preview and Logs -->
+        <!-- RIGHT COLUMN: Preview and Logs (2/3 width) -->
         <LinearLayout
+            android:id="@+id/right_column_container"
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_weight="2"
             android:orientation="vertical"
-            android:paddingStart="8dp">
+            android:paddingStart="6dp"
+            app:layout_constraintHorizontal_weight="2"
+            app:layout_constraintStart_toEndOf="@id/left_column_container"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintBottom_toBottomOf="parent">
 
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/cv_preview"
@@ -289,7 +303,7 @@
                 android:layout_height="0dp"
                 android:layout_weight="1"
                 app:cardCornerRadius="24dp"
-                app:cardElevation="4dp"
+                app:cardElevation="2dp"
                 app:cardBackgroundColor="#000000">
 
                 <FrameLayout
@@ -334,8 +348,8 @@
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/cv_logs"
                 android:layout_width="match_parent"
-                android:layout_height="200dp"
-                android:layout_marginTop="16dp"
+                android:layout_height="180dp"
+                android:layout_marginTop="12dp"
                 app:cardCornerRadius="16dp"
                 app:cardElevation="0dp"
                 app:strokeWidth="1dp"
@@ -367,5 +381,5 @@
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
         </LinearLayout>
-    </LinearLayout>
+    </androidx.constraintlayout.widget.ConstraintLayout>
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
