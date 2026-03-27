@@ -1,8 +1,9 @@
-name: Android CI with Signing
+name: Android CI & Release
 
 on:
   push:
     branches: ["master", "main"]
+    tags: ["v*"]
   pull_request:
     branches: ["master", "main"]
 
@@ -30,7 +31,6 @@ jobs:
 
       - name: Sign APK
         id: sign_app
-        # Only run if the secret is present to avoid failure on missing secrets
         if: success() && secrets.SIGNING_KEY != null
         uses: r0adkll/sign-android-release@v1
         with:
@@ -39,20 +39,29 @@ jobs:
           alias: ${{ secrets.ALIAS }}
           keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
           keyPassword: ${{ secrets.KEY_PASSWORD }}
-          # Use a version that exists on the runner
           buildToolsVersion: "34.0.0"
 
-      - name: Upload Signed APK
+      - name: Upload Signed APK to Artifacts
         uses: actions/upload-artifact@v4
         if: success() && steps.sign_app.outputs.signedReleaseFile != ''
         with:
           name: release-apk-signed
           path: ${{ steps.sign_app.outputs.signedReleaseFile }}
 
-      # Fallback if signing is not configured (will upload unsigned if secrets missing)
-      - name: Upload Unsigned APK (Alternative)
+      - name: Upload Unsigned APK to Artifacts (Alternative)
         if: always() && (steps.sign_app.outcome == 'skipped' || steps.sign_app.outputs.signedReleaseFile == '')
         uses: actions/upload-artifact@v4
         with:
           name: release-apk-unsigned
           path: app/build/outputs/apk/release/*.apk
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.sign_app.outputs.signedReleaseFile }}
+            app/build/outputs/apk/release/*-unsigned.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
