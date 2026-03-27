@@ -31,7 +31,10 @@ jobs:
 
       - name: Sign APK
         id: sign_app
-        if: success() && secrets.SIGNING_KEY != null
+        # Store secret in env to check its existence in 'if'
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        if: success() && env.SIGNING_KEY != ''
         uses: r0adkll/sign-android-release@v1
         with:
           releaseDirectory: app/build/outputs/apk/release
