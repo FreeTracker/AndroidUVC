@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
+project(libusb_internal C)
 
 # 定义 libusb 核心源码文件（根据版本可能略有差异）
 set(LIBUSB_SOURCES
