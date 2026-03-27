@@ -186,11 +186,14 @@
                     <com.google.android.material.textfield.TextInputLayout
                         android:id="@+id/til_resolution"
                         style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
-                        android:layout_width="0dp"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:hint="Res"
-                        android:layout_marginEnd="8dp">
+                        android:hint="Resolution"
+                        android:visibility="gone"
+                        tools:visibility="visible"
+                        android:layout_marginEnd="8dp"
+                        app:layout_flexGrow="1"
+                        app:layout_minWidth="140dp">
                         <AutoCompleteTextView
                             android:id="@+id/actv_resolution"
                             android:layout_width="match_parent"
@@ -201,10 +204,13 @@
                     <com.google.android.material.textfield.TextInputLayout
                         android:id="@+id/til_fps"
                         style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
-                        android:layout_width="0dp"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:hint="FPS">
+                        android:hint="FPS"
+                        android:visibility="gone"
+                        tools:visibility="visible"
+                        app:layout_flexGrow="1"
+                        app:layout_minWidth="100dp">
                         <AutoCompleteTextView
                             android:id="@+id/actv_fps"
                             android:layout_width="match_parent"
