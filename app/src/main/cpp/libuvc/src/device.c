@@ -263,7 +263,7 @@ uint8_t uvc_get_device_address(uvc_device_t *dev) {
   return libusb_get_device_address(dev->usb_dev);
 }
 
-static uvc_error_t uvc_open_internal(uvc_device_t *dev, struct libusb_device_handle *usb_devh, uvc_device_handle_t **devh);
+uvc_error_t uvc_open_internal(uvc_device_t *dev, struct libusb_device_handle *usb_devh, uvc_device_handle_t **devh);
 
 #if LIBUSB_API_VERSION >= 0x01000107
 /** @brief Wrap a platform-specific system device handle and obtain a UVC device handle.
@@ -334,7 +334,7 @@ uvc_error_t uvc_open(
   return ret;
 }
 
-static uvc_error_t uvc_open_internal(
+uvc_error_t uvc_open_internal(
     uvc_device_t *dev,
     struct libusb_device_handle *usb_devh,
     uvc_device_handle_t **devh) {
