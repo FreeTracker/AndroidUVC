@@ -27,8 +27,12 @@ jobs:
         run: chmod +x gradlew
 
       - name: Decode Keystore
-        if: github.event_name != 'pull_request' && secrets.SIGNING_KEY != null
-        run: echo "${{ secrets.SIGNING_KEY }}" | base64 --decode > app/release.jks
+        id: decode_keystore
+        # Standard way to check secret in 'if' is using env
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        if: github.event_name != 'pull_request' && env.SIGNING_KEY != ''
+        run: echo "$SIGNING_KEY" | base64 --decode > app/release.jks
 
       - name: Build with Gradle
         run: ./gradlew assembleRelease
