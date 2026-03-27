@@ -567,7 +567,10 @@ class MainActivity : AppCompatActivity() {
         uvcService?.onFrameUpdateListener = null
         uvcService?.onSessionCreatedListener = null
         uvcService?.onLogMessage = null
-        if (isBound) unbindService(serviceConnection)
+        if (isBound) {
+            uvcService?.stopIfIdle()
+            unbindService(serviceConnection)
+        }
         mainHandler.removeCallbacks(uiUpdater)
         decodeExecutor.shutdown()
         try {

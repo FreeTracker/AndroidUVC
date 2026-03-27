@@ -112,6 +112,23 @@ class UvcStreamingService : Service() {
         startHttpServer(port)
     }
 
+    fun stopIfIdle() {
+        log("Checking for idle resources before activity exit...")
+        // Release all cameras that are NOT streaming
+        sessionsByFd.values.filter { !it.isStreaming }.forEach { session ->
+            log("Auto-releasing idle Cam ${session.index}")
+            releaseCamera(session.fd)
+        }
+        
+        // If no cameras are left (meaning no one was streaming), stop the service
+        if (sessionsByFd.isEmpty()) {
+            log("No active streams found. Stopping service.")
+            stopAllAndExit()
+        } else {
+            log("Active streams remain (${sessionsByFd.size}). Keeping service alive in background.")
+        }
+    }
+
     private fun stopAllAndExit() {
         sessionsByFd.keys.toList().forEach { releaseCamera(it) }
         server?.stop()
