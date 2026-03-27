@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
+project(AndroidUVC_Native)
 
 # 1. 包含子目录（会自动执行子目录的 CMakeLists.txt）
 add_subdirectory(libusb)
