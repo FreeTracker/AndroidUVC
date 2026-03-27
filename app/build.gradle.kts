@@ -19,8 +19,8 @@ android {
         externalNativeBuild {
             cmake {
                 // 关键：libusb 需要特定的 C 标志
-                cppFlags.addLast("-std=c++11")
-                arguments.addLast("-DANDROID_STL=c++_shared")
+                cppFlags.add("-std=c++11")
+                arguments.add("-DANDROID_STL=c++_shared")
                 // 这里的 abiFilters 决定了生成的 .so 支持哪些手机
             }
         }
