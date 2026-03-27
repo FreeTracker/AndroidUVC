@@ -29,6 +29,7 @@ jobs:
         run: ./gradlew assembleRelease
 
       - name: Sign APK
+        id: sign_app
         if: success()
         uses: r0adkll/sign-android-release@v1
         with:
