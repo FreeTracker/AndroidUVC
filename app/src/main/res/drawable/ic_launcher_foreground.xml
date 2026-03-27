@@ -1,0 +1,29 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+        xmlns:aapt="http://schemas.android.com/aapt"
+        android:width="108dp"
+        android:height="108dp"
+        android:viewportWidth="108"
+        android:viewportHeight="108">
+    <!-- Outer Lens Ring -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,54m-32,0a32,32 0,1 1,64 0a32,32 0,1 1,-64 0" />
+    <!-- Lens Body -->
+    <path
+        android:fillColor="#2196F3"
+        android:pathData="M54,54m-28,0a28,28 0,1 1,56 0a28,28 0,1 1,-56 0" />
+    <!-- Pupil / Aperture -->
+    <path
+        android:fillColor="#0D47A1"
+        android:pathData="M54,54m-12,0a12,12 0,1 1,24 0a12,12 0,1 1,-24 0" />
+    <!-- Highlight -->
+    <path
+        android:fillColor="#80FFFFFF"
+        android:pathData="M48,46m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+    <!-- Signal Waves -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M72,32c8,8 8,24 0,32M82,24c12,12 12,36 0,48" />
+</vector>

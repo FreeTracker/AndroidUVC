@@ -1,0 +1,39 @@
+<resources>
+    <string name="app_name">UVC Camera</string>
+    <string name="bandwidth_title">Bandwidth</string>
+    <string name="avg_fps_title">Avg FPS</string>
+    <string name="server_ip_title">Server IP</string>
+    <string name="streams_prefix">STREAMS: </string>
+    <string name="system_messages_title">System Messages</string>
+    <string name="preview_off_text">Preview Off</string>
+    <string name="web_url_label">Web URL: http://%1$s:%2$d</string>
+    <string name="select_camera">Select Camera</string>
+    <string name="refresh">Refresh</string>
+    <string name="usb_status_not_connected">USB: Not Connected</string>
+    <string name="usb_status_not_found">USB: Not Found</string>
+    <string name="usb_status_cam_index">Cam %1$d: %2$s</string>
+    <string name="resolution_hint">Resolution</string>
+    <string name="fps_hint">FPS</string>
+    <string name="local_preview">Local Preview</string>
+    <string name="start_streaming">START STREAM</string>
+    <string name="stop_streaming">STOP STREAM</string>
+    <string name="preview_label">LOCAL PREVIEW</string>
+    <string name="preview_label_with_id">CAM %d • LIVE</string>
+    <string name="preview_label_id_only">CAM %d</string>
+    <string name="preview_disabled_hint">Preview Disabled\n(Saving CPU)</string>
+    <string name="logs_header">Logs:\n</string>
+    <string name="no_uvc_device">No UVC Device</string>
+    <string name="bandwidth_label">%1$.1f Mbps</string>
+    <string name="avg_fps_label">%1$.1f</string>
+    <string name="none">NONE</string>
+    <string name="streaming_status">LIVE</string>
+    <string name="idle_status">IDLE</string>
+    <string name="service_not_ready">Service not ready.</string>
+    <string name="no_device_selected">No device selected.</string>
+    <string name="camera_initializing_wait">Camera is still initializing, please wait...</string>
+    <string name="error_selection_incomplete">Error: Resolution or FPS not selected.</string>
+    
+    <string name="perm_title">Permissions Required</string>
+    <string name="perm_description">To provide a high-quality UVC streaming experience, this app requires access to your camera, microphone, and USB hardware.</string>
+    <string name="grant_permissions">Grant Permissions</string>
+</resources>

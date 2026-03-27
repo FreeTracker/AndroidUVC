@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- UVC 设备的 Class 是 239 (0xEF) -->
+    <usb-device device-class="239" />
+    <!-- 或者匹配具体的 Video 接口 Class 14 -->
+    <usb-interface class="14" />
+</resources>

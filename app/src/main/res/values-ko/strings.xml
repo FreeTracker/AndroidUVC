@@ -1,0 +1,39 @@
+<resources>
+    <string name="app_name">UVC Camera</string>
+    <string name="bandwidth_title">대역폭</string>
+    <string name="avg_fps_title">평균 FPS</string>
+    <string name="server_ip_title">서버 IP</string>
+    <string name="streams_prefix">스트림: </string>
+    <string name="system_messages_title">시스템 메시지</string>
+    <string name="preview_off_text">미리보기 꺼짐</string>
+    <string name="web_url_label">웹 URL: http://%1$s:%2$d</string>
+    <string name="select_camera">카메라 선택</string>
+    <string name="refresh">새로고침</string>
+    <string name="usb_status_not_connected">USB: 연결되지 않음</string>
+    <string name="usb_status_not_found">USB: 찾을 수 없음</string>
+    <string name="usb_status_cam_index">카메라 %1$d: %2$s</string>
+    <string name="resolution_hint">해상도</string>
+    <string name="fps_hint">FPS</string>
+    <string name="local_preview">로컬 미리보기</string>
+    <string name="start_streaming">스트리밍 시작</string>
+    <string name="stop_streaming">스트리밍 중지</string>
+    <string name="preview_label">로컬 미리보기</string>
+    <string name="preview_label_with_id">카메라 %d • 라이브</string>
+    <string name="preview_label_id_only">카메라 %d</string>
+    <string name="preview_disabled_hint">미리보기 비활성화됨\n(CPU 절약)</string>
+    <string name="logs_header">로그:\n</string>
+    <string name="no_uvc_device">UVC 장치 없음</string>
+    <string name="bandwidth_label">%1$.1f Mbps</string>
+    <string name="avg_fps_label">%1$.1f</string>
+    <string name="none">없음</string>
+    <string name="streaming_status">라이브</string>
+    <string name="idle_status">대기 중</string>
+    <string name="service_not_ready">서비스가 준비되지 않았습니다.</string>
+    <string name="no_device_selected">장치가 선택되지 않았습니다.</string>
+    <string name="camera_initializing_wait">카메라를 초기화하는 중입니다. 잠시만 기다려 주세요...</string>
+    <string name="error_selection_incomplete">오류: 해상도 또는 FPS가 선택되지 않았습니다.</string>
+    
+    <string name="perm_title">권한 필요</string>
+    <string name="perm_description">고품질 UVC 스트리밍 환경을 제공하기 위해 이 앱은 카메라, 마이크 및 USB 하드웨어에 대한 접근 권한이 필요합니다.</string>
+    <string name="grant_permissions">권한 허용</string>
+</resources>
