@@ -21,20 +21,48 @@ extern "C" {
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 
+// Global Libusb Context and Event Thread
+static libusb_context *g_usb_ctx = nullptr;
+static std::thread g_event_thread;
+static std::atomic<bool> g_event_thread_run{false};
+static std::mutex g_usb_init_mutex;
+
+void global_usb_event_thread() {
+    LOGI("Global USB event thread started");
+    while (g_event_thread_run) {
+        struct timeval tv = {0, 100000};
+        libusb_handle_events_timeout_completed(g_usb_ctx, &tv, NULL);
+    }
+    LOGI("Global USB event thread stopped");
+}
+
+void ensure_usb_ctx() {
+    std::lock_guard<std::mutex> lock(g_usb_init_mutex);
+    if (!g_usb_ctx) {
+        // Option 2 is LIBUSB_OPTION_NO_DEVICE_DISCOVERY in many libusb-1.0.22+ versions
+        // On some platforms it might be different, but for Android UVC it's standard.
+        libusb_set_option(NULL, (libusb_option)2);
+        if (libusb_init(&g_usb_ctx) >= 0) {
+            g_event_thread_run = true;
+            g_event_thread = std::thread(global_usb_event_thread);
+        } else {
+            LOGE("Failed to initialize libusb context");
+            g_usb_ctx = nullptr;
+        }
+    }
+}
+
 struct CameraContext {
     int fd;
-    libusb_context *usb_ctx = nullptr;
     uvc_context_t *uvc_ctx = nullptr;
     uvc_device_handle_t *devh = nullptr;
     uvc_device_t *dev = nullptr;
-    
-    std::atomic<bool> event_thread_run{false};
-    std::thread event_thread;
     
     jobject java_buffer = nullptr;
     uint8_t *buffer_ptr = nullptr;
     std::atomic<uint64_t> frame_count{0};
     std::recursive_mutex buffer_mutex;
+    std::mutex uvc_mutex; // Protects libuvc streaming operations
 
     std::atomic<bool> cleaned_up{false};
 
@@ -44,34 +72,24 @@ struct CameraContext {
             return;
         }
 
-        // 1. MUST stop UVC streaming BEFORE stopping the event thread to avoid deadlock.
-        if (devh) {
-            uvc_stop_streaming(devh);
-            uvc_close(devh);
-            devh = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(uvc_mutex);
+            if (devh) {
+                uvc_stop_streaming(devh);
+                uvc_close(devh);
+                devh = nullptr;
+            }
+
+            if (dev) {
+                free(dev);
+                dev = nullptr;
+            }
+            if (uvc_ctx) {
+                uvc_exit(uvc_ctx);
+                uvc_ctx = nullptr;
+            }
         }
 
-        // 2. NOW safely stop the event thread.
-        event_thread_run = false;
-        if (event_thread.joinable()) {
-            event_thread.join();
-        }
-
-        // 3. Free remaining contexts
-        if (dev) {
-            free(dev);
-            dev = nullptr;
-        }
-        if (uvc_ctx) {
-            uvc_exit(uvc_ctx);
-            uvc_ctx = nullptr;
-        }
-        if (usb_ctx) {
-            libusb_exit(usb_ctx);
-            usb_ctx = nullptr;
-        }
-
-        // 4. Release global JVM reference
         if (java_buffer && env) {
             env->DeleteGlobalRef(java_buffer);
             java_buffer = nullptr;
@@ -79,17 +97,16 @@ struct CameraContext {
     }
 
     ~CameraContext() {
-        // Fallback in case not explicitly called
         cleanup(nullptr);
     }
 };
 
-JavaVM *g_jvm = nullptr;
-jobject g_java_callback_obj = nullptr;
-jmethodID g_on_frame_mid = nullptr;
+static JavaVM *g_jvm = nullptr;
+static jobject g_java_callback_obj = nullptr;
+static jmethodID g_on_frame_mid = nullptr;
 
-std::map<int, std::shared_ptr<CameraContext>> g_camera_map;
-std::mutex g_map_mutex;
+static std::map<int, std::shared_ptr<CameraContext>> g_camera_map;
+static std::mutex g_map_mutex;
 
 std::shared_ptr<CameraContext> get_camera_context(int fd) {
     std::lock_guard<std::mutex> lock(g_map_mutex);
@@ -98,15 +115,6 @@ std::shared_ptr<CameraContext> get_camera_context(int fd) {
         return it->second;
     }
     return nullptr;
-}
-
-void usb_event_thread(std::shared_ptr<CameraContext> ctx) {
-    LOGI("Native[%d]: Event thread started", ctx->fd);
-    while (ctx->event_thread_run) {
-        struct timeval tv = {0, 100000};
-        libusb_handle_events_timeout_completed(ctx->usb_ctx, &tv, NULL);
-    }
-    LOGI("Native[%d]: Event thread stopped", ctx->fd);
 }
 
 void frame_callback(uvc_frame_t *frame, void *ptr) {
@@ -157,6 +165,12 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_unlockBuffer(JNIEnv *env, jobject t
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *env, jobject thiz, jint fd) {
+    ensure_usb_ctx();
+    if (!g_usb_ctx) {
+        LOGE("libusb_context not available");
+        return env->NewStringUTF("");
+    }
+
     if (!g_java_callback_obj) {
         std::lock_guard<std::mutex> lock(g_map_mutex);
         if (!g_java_callback_obj) {
@@ -183,19 +197,14 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
     auto ctx = std::make_shared<CameraContext>();
     ctx->fd = fd;
 
-    libusb_set_option(NULL, (libusb_option)2);
-    if (libusb_init(&ctx->usb_ctx) < 0) { return env->NewStringUTF(""); }
-    libusb_set_option(ctx->usb_ctx, (libusb_option)3, 32);
-
     libusb_device_handle *usb_handle = NULL;
-    if (libusb_wrap_sys_device(ctx->usb_ctx, (intptr_t)fd, &usb_handle) < 0) {
+    if (libusb_wrap_sys_device(g_usb_ctx, (intptr_t)fd, &usb_handle) < 0) {
+        LOGE("libusb_wrap_sys_device failed for FD %d", fd);
         ctx->cleanup(env); return env->NewStringUTF("");
     }
 
-    ctx->event_thread_run = true;
-    ctx->event_thread = std::thread(usb_event_thread, ctx);
-
-    if (uvc_init(&ctx->uvc_ctx, ctx->usb_ctx) < 0) {
+    if (uvc_init(&ctx->uvc_ctx, g_usb_ctx) < 0) {
+        LOGE("uvc_init failed for FD %d", fd);
         libusb_close(usb_handle); ctx->cleanup(env); return env->NewStringUTF("");
     }
 
@@ -205,6 +214,7 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
     ctx->dev->ref = 1;
 
     if (uvc_open_internal(ctx->dev, usb_handle, &ctx->devh) != UVC_SUCCESS) {
+        LOGE("uvc_open_internal failed for FD %d", fd);
         libusb_close(usb_handle); ctx->cleanup(env); return env->NewStringUTF("");
     }
 
@@ -248,15 +258,27 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_startUVC(JNIEnv *env, jobject thiz,
         ctx->buffer_ptr = (uint8_t*)env->GetDirectBufferAddress(buffer);
     }
 
+    std::unique_lock<std::mutex> uvc_lock(ctx->uvc_mutex);
+    if (ctx->cleaned_up || !ctx->devh) return;
+
     uvc_stop_streaming(ctx->devh);
+    
+    // Unlock to allow UI detach (cleanup) while we afford hardware settle time
+    uvc_lock.unlock();
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    uvc_lock.lock();
+
+    if (ctx->cleaned_up || !ctx->devh) return;
 
     uvc_stream_ctrl_t ctrl;
     uvc_error_t res = uvc_get_stream_ctrl_format_size(ctx->devh, &ctrl, UVC_FRAME_FORMAT_MJPEG, width, height, fps);
     
     if (res != UVC_SUCCESS) {
         LOGE("Native[%d]: Failed to get stream ctrl (%s), retrying...", fd, uvc_strerror(res));
+        uvc_lock.unlock();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        uvc_lock.lock();
+        if (ctx->cleaned_up || !ctx->devh) return;
         res = uvc_get_stream_ctrl_format_size(ctx->devh, &ctrl, UVC_FRAME_FORMAT_MJPEG, width, height, fps);
     }
 
@@ -276,6 +298,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_net_d7z_net_oss_uvc_UvcStreamingService_stopUVC(JNIEnv *env, jobject thiz, jint fd) {
     auto ctx = get_camera_context(fd);
     if (ctx) {
+        std::lock_guard<std::mutex> lock(ctx->uvc_mutex);
+        if (ctx->cleaned_up || !ctx->devh) return;
         uvc_stop_streaming(ctx->devh);
     }
 }
@@ -288,18 +312,13 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_releaseUVC(JNIEnv *env, jobject thi
         auto it = g_camera_map.find(fd);
         if (it != g_camera_map.end()) {
             target_ctx = it->second;
-            // Intentionally DO NOT erase yet. We want unlockBuffer to still find it.
         }
     }
     
     if (target_ctx) {
         target_ctx->cleanup(env);
-        
-        // Wait gracefully for any ongoing lockBuffer/unlockBuffer operations from Kotlin
         std::lock_guard<std::recursive_mutex> buffer_lock(target_ctx->buffer_mutex);
-        
         {
-            // Fully safe to erase now
             std::lock_guard<std::mutex> lock(g_map_mutex);
             g_camera_map.erase(fd);
         }
