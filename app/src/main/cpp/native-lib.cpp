@@ -8,6 +8,7 @@
 #include <thread>
 #include <map>
 #include <mutex>
+#include <memory>
 
 extern "C" {
     #include <libusb.h>
@@ -33,16 +34,30 @@ struct CameraContext {
     jobject java_buffer = nullptr;
     uint8_t *buffer_ptr = nullptr;
     std::atomic<uint64_t> frame_count{0};
-    std::recursive_mutex buffer_mutex; // Protects buffer_ptr access, recursive to allow JNI re-entry
+    std::recursive_mutex buffer_mutex;
 
-    void cleanup() {
-        event_thread_run = false;
-        if (event_thread.joinable()) event_thread.join();
+    std::atomic<bool> cleaned_up{false};
+
+    void cleanup(JNIEnv* env) {
+        bool expected = false;
+        if (!cleaned_up.compare_exchange_strong(expected, true)) {
+            return;
+        }
+
+        // 1. MUST stop UVC streaming BEFORE stopping the event thread to avoid deadlock.
         if (devh) {
             uvc_stop_streaming(devh);
             uvc_close(devh);
             devh = nullptr;
         }
+
+        // 2. NOW safely stop the event thread.
+        event_thread_run = false;
+        if (event_thread.joinable()) {
+            event_thread.join();
+        }
+
+        // 3. Free remaining contexts
         if (dev) {
             free(dev);
             dev = nullptr;
@@ -55,16 +70,37 @@ struct CameraContext {
             libusb_exit(usb_ctx);
             usb_ctx = nullptr;
         }
+
+        // 4. Release global JVM reference
+        if (java_buffer && env) {
+            env->DeleteGlobalRef(java_buffer);
+            java_buffer = nullptr;
+        }
+    }
+
+    ~CameraContext() {
+        // Fallback in case not explicitly called
+        cleanup(nullptr);
     }
 };
 
 JavaVM *g_jvm = nullptr;
 jobject g_java_callback_obj = nullptr;
 jmethodID g_on_frame_mid = nullptr;
-std::map<int, CameraContext*> g_camera_map;
+
+std::map<int, std::shared_ptr<CameraContext>> g_camera_map;
 std::mutex g_map_mutex;
 
-void usb_event_thread(CameraContext *ctx) {
+std::shared_ptr<CameraContext> get_camera_context(int fd) {
+    std::lock_guard<std::mutex> lock(g_map_mutex);
+    auto it = g_camera_map.find(fd);
+    if (it != g_camera_map.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
+
+void usb_event_thread(std::shared_ptr<CameraContext> ctx) {
     LOGI("Native[%d]: Event thread started", ctx->fd);
     while (ctx->event_thread_run) {
         struct timeval tv = {0, 100000};
@@ -81,6 +117,7 @@ void frame_callback(uvc_frame_t *frame, void *ptr) {
     
     {
         std::lock_guard<std::recursive_mutex> lock(ctx->buffer_mutex);
+        if (ctx->cleaned_up || !ctx->buffer_ptr) return;
         memcpy(ctx->buffer_ptr, frame->data, frame->data_bytes);
     }
 
@@ -92,7 +129,7 @@ void frame_callback(uvc_frame_t *frame, void *ptr) {
     if (g_java_callback_obj && g_on_frame_mid) {
         env->CallVoidMethod(g_java_callback_obj, g_on_frame_mid, (jint)ctx->fd, (jint)frame->data_bytes);
         if (env->ExceptionCheck()) {
-            env->ExceptionClear(); // 清除抛出的异常，防止 JNI 崩溃
+            env->ExceptionClear();
         }
     }
 }
@@ -104,13 +141,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
 
 extern "C" JNIEXPORT void JNICALL
 Java_net_d7z_net_oss_uvc_UvcStreamingService_lockBuffer(JNIEnv *env, jobject thiz, jint fd) {
-    CameraContext *ctx = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_map_mutex);
-        if (g_camera_map.count(fd)) {
-            ctx = g_camera_map[fd];
-        }
-    }
+    auto ctx = get_camera_context(fd);
     if (ctx) {
         ctx->buffer_mutex.lock();
     }
@@ -118,13 +149,7 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_lockBuffer(JNIEnv *env, jobject thi
 
 extern "C" JNIEXPORT void JNICALL
 Java_net_d7z_net_oss_uvc_UvcStreamingService_unlockBuffer(JNIEnv *env, jobject thiz, jint fd) {
-    CameraContext *ctx = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_map_mutex);
-        if (g_camera_map.count(fd)) {
-            ctx = g_camera_map[fd];
-        }
-    }
+    auto ctx = get_camera_context(fd);
     if (ctx) {
         ctx->buffer_mutex.unlock();
     }
@@ -132,38 +157,46 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_unlockBuffer(JNIEnv *env, jobject t
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *env, jobject thiz, jint fd) {
-    std::lock_guard<std::mutex> lock(g_map_mutex);
-    
-    // 初始化全局回调对象，只执行一次
     if (!g_java_callback_obj) {
-        env->GetJavaVM(&g_jvm);
-        g_java_callback_obj = env->NewGlobalRef(thiz);
-        g_on_frame_mid = env->GetMethodID(env->GetObjectClass(thiz), "onFrameReady", "(II)V");
+        std::lock_guard<std::mutex> lock(g_map_mutex);
+        if (!g_java_callback_obj) {
+            env->GetJavaVM(&g_jvm);
+            g_java_callback_obj = env->NewGlobalRef(thiz);
+            g_on_frame_mid = env->GetMethodID(env->GetObjectClass(thiz), "onFrameReady", "(II)V");
+        }
     }
 
-    if (g_camera_map.count(fd)) {
-        g_camera_map[fd]->cleanup();
-        delete g_camera_map[fd];
-        g_camera_map.erase(fd);
+    std::shared_ptr<CameraContext> old_ctx;
+    {
+        std::lock_guard<std::mutex> lock(g_map_mutex);
+        auto it = g_camera_map.find(fd);
+        if (it != g_camera_map.end()) {
+            old_ctx = it->second;
+            g_camera_map.erase(it);
+        }
+    }
+    
+    if (old_ctx) {
+        old_ctx->cleanup(env);
     }
 
-    CameraContext *ctx = new CameraContext();
+    auto ctx = std::make_shared<CameraContext>();
     ctx->fd = fd;
 
     libusb_set_option(NULL, (libusb_option)2);
-    if (libusb_init(&ctx->usb_ctx) < 0) { delete ctx; return env->NewStringUTF(""); }
+    if (libusb_init(&ctx->usb_ctx) < 0) { return env->NewStringUTF(""); }
     libusb_set_option(ctx->usb_ctx, (libusb_option)3, 32);
 
     libusb_device_handle *usb_handle = NULL;
     if (libusb_wrap_sys_device(ctx->usb_ctx, (intptr_t)fd, &usb_handle) < 0) {
-        ctx->cleanup(); delete ctx; return env->NewStringUTF("");
+        ctx->cleanup(env); return env->NewStringUTF("");
     }
 
     ctx->event_thread_run = true;
     ctx->event_thread = std::thread(usb_event_thread, ctx);
 
     if (uvc_init(&ctx->uvc_ctx, ctx->usb_ctx) < 0) {
-        libusb_close(usb_handle); ctx->cleanup(); delete ctx; return env->NewStringUTF("");
+        libusb_close(usb_handle); ctx->cleanup(env); return env->NewStringUTF("");
     }
 
     ctx->dev = (uvc_device_t *)calloc(1, sizeof(uvc_device_t));
@@ -172,10 +205,13 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
     ctx->dev->ref = 1;
 
     if (uvc_open_internal(ctx->dev, usb_handle, &ctx->devh) != UVC_SUCCESS) {
-        libusb_close(usb_handle); ctx->cleanup(); delete ctx; return env->NewStringUTF("");
+        libusb_close(usb_handle); ctx->cleanup(env); return env->NewStringUTF("");
     }
 
-    g_camera_map[fd] = ctx;
+    {
+        std::lock_guard<std::mutex> lock(g_map_mutex);
+        g_camera_map[fd] = ctx;
+    }
 
     std::stringstream ss;
     const uvc_format_desc_t *format_desc = uvc_get_format_descs(ctx->devh);
@@ -202,16 +238,17 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
 
 extern "C" JNIEXPORT void JNICALL
 Java_net_d7z_net_oss_uvc_UvcStreamingService_startUVC(JNIEnv *env, jobject thiz, jint fd, jobject buffer, jint width, jint height, jint fps) {
-    std::lock_guard<std::mutex> lock(g_map_mutex);
-    if (!g_camera_map.count(fd)) return;
-    CameraContext *ctx = g_camera_map[fd];
+    auto ctx = get_camera_context(fd);
+    if (!ctx) return;
 
-    if (ctx->java_buffer) env->DeleteGlobalRef(ctx->java_buffer);
-    ctx->java_buffer = env->NewGlobalRef(buffer);
-    ctx->buffer_ptr = (uint8_t*)env->GetDirectBufferAddress(buffer);
+    {
+        std::lock_guard<std::recursive_mutex> lock(ctx->buffer_mutex);
+        if (ctx->java_buffer) env->DeleteGlobalRef(ctx->java_buffer);
+        ctx->java_buffer = env->NewGlobalRef(buffer);
+        ctx->buffer_ptr = (uint8_t*)env->GetDirectBufferAddress(buffer);
+    }
 
     uvc_stop_streaming(ctx->devh);
-    // 给摄像头硬件一点缓冲时间，特别是热插拔或切换分辨率后
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
     uvc_stream_ctrl_t ctrl;
@@ -224,7 +261,7 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_startUVC(JNIEnv *env, jobject thiz,
     }
 
     if (res == UVC_SUCCESS) {
-        res = uvc_start_streaming(ctx->devh, &ctrl, frame_callback, (void*)ctx, 0);
+        res = uvc_start_streaming(ctx->devh, &ctrl, frame_callback, (void*)ctx.get(), 0);
         if (res == UVC_SUCCESS) {
             LOGI("Native[%d]: Streaming started.", fd);
         } else {
@@ -237,19 +274,34 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_startUVC(JNIEnv *env, jobject thiz,
 
 extern "C" JNIEXPORT void JNICALL
 Java_net_d7z_net_oss_uvc_UvcStreamingService_stopUVC(JNIEnv *env, jobject thiz, jint fd) {
-    std::lock_guard<std::mutex> lock(g_map_mutex);
-    if (g_camera_map.count(fd)) {
-        uvc_stop_streaming(g_camera_map[fd]->devh);
+    auto ctx = get_camera_context(fd);
+    if (ctx) {
+        uvc_stop_streaming(ctx->devh);
     }
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_net_d7z_net_oss_uvc_UvcStreamingService_releaseUVC(JNIEnv *env, jobject thiz, jint fd) {
-    std::lock_guard<std::mutex> lock(g_map_mutex);
-    if (g_camera_map.count(fd)) {
-        g_camera_map[fd]->cleanup();
-        if (g_camera_map[fd]->java_buffer) env->DeleteGlobalRef(g_camera_map[fd]->java_buffer);
-        delete g_camera_map[fd];
-        g_camera_map.erase(fd);
+    std::shared_ptr<CameraContext> target_ctx;
+    {
+        std::lock_guard<std::mutex> lock(g_map_mutex);
+        auto it = g_camera_map.find(fd);
+        if (it != g_camera_map.end()) {
+            target_ctx = it->second;
+            // Intentionally DO NOT erase yet. We want unlockBuffer to still find it.
+        }
+    }
+    
+    if (target_ctx) {
+        target_ctx->cleanup(env);
+        
+        // Wait gracefully for any ongoing lockBuffer/unlockBuffer operations from Kotlin
+        std::lock_guard<std::recursive_mutex> buffer_lock(target_ctx->buffer_mutex);
+        
+        {
+            // Fully safe to erase now
+            std::lock_guard<std::mutex> lock(g_map_mutex);
+            g_camera_map.erase(fd);
+        }
     }
 }
