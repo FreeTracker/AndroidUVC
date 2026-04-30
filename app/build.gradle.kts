@@ -1,6 +1,9 @@
+import java.util.zip.GZIPOutputStream
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.aboutlibraries.android)
 }
 
 android {
@@ -63,6 +66,57 @@ android {
     buildFeatures {
         compose = true
     }
+
+    sourceSets.getByName("main").res.setSrcDirs(
+        listOf(
+            "src/main/res",
+            layout.buildDirectory.dir("generated/res/bundledLicenses").get().asFile
+        )
+    )
+}
+
+aboutLibraries {
+    collect {
+        configPath = file("../aboutlibraries")
+        fetchRemoteLicense = false
+        fetchRemoteFunding = false
+    }
+}
+
+val bundledLicenseSources = mapOf(
+    "project_license.gz" to rootProject.layout.projectDirectory.file("LICENSE"),
+    "libusb_notice.gz" to layout.projectDirectory.file("src/main/cpp/libusb/COPYING"),
+    "libuvc_license.gz" to layout.projectDirectory.file("src/main/cpp/libuvc/LICENSE.txt")
+)
+
+val generateBundledLicenseResources by tasks.registering {
+    val outputDir = layout.buildDirectory.dir("generated/res/bundledLicenses/raw")
+
+    inputs.files(bundledLicenseSources.values)
+    outputs.dir(outputDir)
+
+    doLast {
+        val rawDir = outputDir.get().asFile
+        if (!rawDir.exists()) {
+            rawDir.mkdirs()
+        }
+
+        bundledLicenseSources.forEach { (outputName, sourceFile) ->
+            val source = sourceFile.asFile
+            val target = rawDir.resolve(outputName)
+            source.inputStream().buffered().use { input ->
+                target.outputStream().buffered().use { fileOutput ->
+                    GZIPOutputStream(fileOutput).use { gzipOutput ->
+                        input.copyTo(gzipOutput)
+                    }
+                }
+            }
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(generateBundledLicenseResources)
 }
 
 dependencies {
@@ -77,6 +131,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.extended)
+    implementation(libs.aboutlibraries.compose.m3)
     implementation(libs.material)
     implementation(libs.nanohttpd)
     debugImplementation(libs.androidx.compose.ui.tooling)

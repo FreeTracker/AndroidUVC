@@ -28,7 +28,7 @@ Connect any UVC-compliant USB camera to your Android device and stream it via MJ
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/d7z-net/AndroidUVC.git
+   git clone https://github.com/FreeTracker/AndroidUVC.git
    cd AndroidUVC
    ```
 2. Open with Android Studio (Koala or newer recommended).
@@ -48,4 +48,4 @@ Connect any UVC-compliant USB camera to your Android device and stream it via MJ
 
 ## 📜 License
 
-This project is licensed under the Apache License 2.0. See `LICENSE` for details.
+This project is licensed under GPL-3.0-or-later. Bundled third-party components, including `libusb` and `libuvc`, remain under their respective original licenses. See `LICENSE` and the in-app open source notices for details.

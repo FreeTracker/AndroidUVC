@@ -36,6 +36,7 @@ import net.d7z.net.oss.uvc.ui.theme.UvcComposeTheme
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
@@ -49,6 +50,8 @@ class MainActivity : AppCompatActivity() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val decodeExecutor = Executors.newSingleThreadExecutor()
+    private val detailExecutor = Executors.newSingleThreadExecutor()
+    private val detailRequestToken = AtomicInteger(0)
     private val requestingPermissions = mutableSetOf<String>()
     private val permissionCooldowns = mutableMapOf<String, Long>()
     private val cooldownMs = 10_000L
@@ -67,6 +70,7 @@ class MainActivity : AppCompatActivity() {
         override fun onServiceDisconnected(name: ComponentName?) {
             isBound = false
             uvcService = null
+            detailRequestToken.incrementAndGet()
             updateUiSnapshot()
         }
     }
@@ -80,6 +84,7 @@ class MainActivity : AppCompatActivity() {
 
     private val callbacks = MainUiCallbacks(
         onOpenDrawer = {},
+        onOpenAbout = { startActivity(Intent(this, AboutActivity::class.java)) },
         onRefresh = { refreshDeviceList() },
         onStartAllStreaming = { startAllStreaming() },
         onStopAllStreaming = { stopAllStreaming() },
@@ -131,12 +136,20 @@ class MainActivity : AppCompatActivity() {
                     uiState.currentDestination is Destination.Camera
                 ) {
                     uiState = uiState.copy(currentDestination = Destination.Camera(session.device.deviceName))
+                    requestCameraDetailRefresh(session.device.deviceName, showLoading = false)
                 }
                 updateUiSnapshot()
             }
         }
         uvcService?.onSessionsChangedListener = {
-            runOnUiThread { updateUiSnapshot() }
+            runOnUiThread {
+                updateUiSnapshot()
+                (uiState.currentDestination as? Destination.Camera)?.deviceName?.let { deviceName ->
+                    if (!uiState.isCameraDetailLoading) {
+                        requestCameraDetailRefresh(deviceName)
+                    }
+                }
+            }
         }
         uvcService?.onFrameUpdateListener = { fd, size ->
             val session = uvcService?.sessionsByFd?.get(fd)
@@ -234,6 +247,7 @@ class MainActivity : AppCompatActivity() {
                 currentDestination = Destination.Home,
                 cameraNavItems = emptyList(),
                 cameraDetail = null,
+                isCameraDetailLoading = false,
                 previewBitmap = null,
                 bandwidthText = "0.0 Mbps",
                 avgFpsText = "0.0",
@@ -303,16 +317,11 @@ class MainActivity : AppCompatActivity() {
             previewBitmap = null
             destination = Destination.Home
         }
-
-        val cameraDetail = when (destination) {
-            Destination.Home -> null
-            is Destination.Camera -> buildCameraDetail(service, destination.deviceName)
-        }
-
-        if (cameraDetail == null && destination is Destination.Camera) {
-            selectedDeviceName = null
-            previewBitmap = null
-            destination = Destination.Home
+        val cameraDestination = destination as? Destination.Camera
+        val cameraDetail = if (cameraDestination != null && uiState.cameraDetail?.deviceName == cameraDestination.deviceName) {
+            uiState.cameraDetail
+        } else {
+            null
         }
 
         if (destination == Destination.Home) {
@@ -323,6 +332,7 @@ class MainActivity : AppCompatActivity() {
             currentDestination = destination,
             cameraNavItems = navItems,
             cameraDetail = cameraDetail,
+            isCameraDetailLoading = if (cameraDestination != null) uiState.isCameraDetailLoading else false,
             previewBitmap = previewBitmap,
             bandwidthText = bandwidthText,
             avgFpsText = avgFpsText,
@@ -333,6 +343,10 @@ class MainActivity : AppCompatActivity() {
             bulkStreamAction = currentBulkAction,
             logLines = logLines.toList()
         )
+
+        if (cameraDestination != null && !uiState.isCameraDetailLoading) {
+            requestCameraDetailRefresh(cameraDestination.deviceName)
+        }
     }
 
     private fun buildCameraDetail(service: UvcStreamingService, deviceName: String): CameraDetailUi? {
@@ -392,6 +406,34 @@ class MainActivity : AppCompatActivity() {
         return resolutionMap
     }
 
+    private fun requestCameraDetailRefresh(deviceName: String, showLoading: Boolean = false) {
+        val service = uvcService ?: return
+        val requestId = detailRequestToken.incrementAndGet()
+        val shouldShowLoading = showLoading || uiState.cameraDetail?.deviceName != deviceName
+
+        if (shouldShowLoading) {
+            uiState = uiState.copy(isCameraDetailLoading = true)
+        }
+
+        detailExecutor.execute {
+            val detail = buildCameraDetail(service, deviceName)
+            runOnUiThread {
+                if (detailRequestToken.get() != requestId || selectedDeviceName != deviceName) return@runOnUiThread
+
+                if (detail == null) {
+                    resetSelectionToHome()
+                    updateUiSnapshot()
+                    return@runOnUiThread
+                }
+
+                uiState = uiState.copy(
+                    cameraDetail = detail,
+                    isCameraDetailLoading = false
+                )
+            }
+        }
+    }
+
     private fun refreshDeviceList() {
         if (uvcService == null) return
         val devices = getUvcDevices()
@@ -425,10 +467,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun openDevice(device: UsbDevice) {
         selectedDeviceName = device.deviceName
-        uiState = uiState.copy(currentDestination = Destination.Camera(device.deviceName), previewBitmap = null)
+        uiState = uiState.copy(
+            currentDestination = Destination.Camera(device.deviceName),
+            cameraDetail = uiState.cameraDetail?.takeIf { it.deviceName == device.deviceName },
+            isCameraDetailLoading = true,
+            previewBitmap = null
+        )
         logToUI("Selected device: ${device.deviceName}")
         val session = uvcService?.sessionsByFd?.values?.find { it.device.deviceName == device.deviceName }
         if (session != null) {
+            requestCameraDetailRefresh(device.deviceName, showLoading = false)
             updateUiSnapshot()
             return
         }
@@ -442,6 +490,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun selectHome() {
+        detailRequestToken.incrementAndGet()
         resetSelectionToHome()
         updateUiSnapshot()
     }
@@ -705,10 +754,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resetSelectionToHome() {
+        detailRequestToken.incrementAndGet()
         selectedDeviceName = null
         uiState = uiState.copy(
             currentDestination = Destination.Home,
             cameraDetail = null,
+            isCameraDetailLoading = false,
             previewBitmap = null
         )
     }
@@ -760,6 +811,7 @@ class MainActivity : AppCompatActivity() {
         }
         mainHandler.removeCallbacks(uiUpdater)
         decodeExecutor.shutdown()
+        detailExecutor.shutdown()
         try {
             unregisterReceiver(usbSystemReceiver)
             unregisterReceiver(usbDynamicReceiver)

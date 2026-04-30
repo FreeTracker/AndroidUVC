@@ -62,6 +62,7 @@ data class MainUiState(
     val currentDestination: Destination = Destination.Home,
     val cameraNavItems: List<CameraNavItem> = emptyList(),
     val cameraDetail: CameraDetailUi? = null,
+    val isCameraDetailLoading: Boolean = false,
     val previewBitmap: Bitmap? = null,
     val bandwidthText: String = "0.0 Mbps",
     val avgFpsText: String = "0.0",
@@ -90,6 +91,7 @@ data class MainUiState(
 
 data class MainUiCallbacks(
     val onOpenDrawer: () -> Unit,
+    val onOpenAbout: () -> Unit,
     val onRefresh: () -> Unit,
     val onStartAllStreaming: () -> Unit,
     val onStopAllStreaming: () -> Unit,

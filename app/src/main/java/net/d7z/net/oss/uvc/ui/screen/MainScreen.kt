@@ -1,5 +1,6 @@
 package net.d7z.net.oss.uvc.ui.screen
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,12 +11,14 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Dashboard
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -24,6 +27,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
@@ -31,7 +35,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -43,7 +51,6 @@ import net.d7z.net.oss.uvc.ui.model.CameraUiStatus
 import net.d7z.net.oss.uvc.ui.model.Destination
 import net.d7z.net.oss.uvc.ui.model.MainUiCallbacks
 import net.d7z.net.oss.uvc.ui.model.MainUiState
-import androidx.compose.ui.res.stringResource
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -96,6 +103,10 @@ fun MainScreen(
                     },
                     onCameraSelected = { deviceName ->
                         callbacks.onSelectCamera(deviceName)
+                        scope.launch { drawerState.close() }
+                    },
+                    onAboutSelected = {
+                        callbacks.onOpenAbout()
                         scope.launch { drawerState.close() }
                     }
                 )
@@ -184,6 +195,21 @@ fun MainScreen(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
+
+                    if (state.isCameraDetailLoading && state.currentDestination is Destination.Camera) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(28.dp))
+                                .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.22f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = Color.Transparent
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -194,7 +220,8 @@ fun MainScreen(
 private fun DrawerPanel(
     state: MainUiState,
     onHomeSelected: () -> Unit,
-    onCameraSelected: (String) -> Unit
+    onCameraSelected: (String) -> Unit,
+    onAboutSelected: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -263,5 +290,14 @@ private fun DrawerPanel(
                 }
             }
         }
+
+        HorizontalDivider()
+
+        NavigationDrawerItem(
+            label = { Text(stringResource(R.string.about)) },
+            selected = false,
+            onClick = onAboutSelected,
+            icon = { Icon(Icons.Rounded.Info, contentDescription = null) }
+        )
     }
 }
