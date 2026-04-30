@@ -33,6 +33,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import net.d7z.net.oss.uvc.R
 import net.d7z.net.oss.uvc.ui.component.EventLogPanel
+import net.d7z.net.oss.uvc.ui.component.rememberStatusTone
 import net.d7z.net.oss.uvc.ui.component.StatusChip
 import net.d7z.net.oss.uvc.ui.model.MainUiCallbacks
 import net.d7z.net.oss.uvc.ui.model.MainUiState
@@ -45,7 +46,6 @@ fun CameraDetailScreen(
     callbacks: MainUiCallbacks,
     modifier: Modifier = Modifier
 ) {
-    val colorScheme = MaterialTheme.colorScheme
     val detail = state.cameraDetail
     if (detail == null || detail.deviceName != selectedName) {
         Card(
@@ -55,10 +55,7 @@ fun CameraDetailScreen(
             Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(stringResource(R.string.camera_pending), style = MaterialTheme.typography.titleLarge, fontFamily = FontFamily.Serif)
                 Text(stringResource(R.string.camera_pending_description), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    FilledTonalButton(onClick = callbacks.onRefresh) { Text(stringResource(R.string.refresh)) }
-                    OutlinedButton(onClick = callbacks.onSelectHome) { Text(stringResource(R.string.back_home)) }
-                }
+                OutlinedButton(onClick = callbacks.onSelectHome) { Text(stringResource(R.string.back_home)) }
             }
         }
         return
@@ -66,6 +63,7 @@ fun CameraDetailScreen(
 
     val resolutionMenuExpanded = remember { mutableStateOf(false) }
     val fpsMenuExpanded = remember { mutableStateOf(false) }
+    val statusTone = rememberStatusTone(detail.status)
 
     Column(
         modifier = modifier
@@ -89,9 +87,9 @@ fun CameraDetailScreen(
                         Text(detail.subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     StatusChip(
-                        text = detail.status,
-                        containerColor = if (detail.isStreaming) colorScheme.primaryContainer else colorScheme.secondaryContainer,
-                        contentColor = if (detail.isStreaming) colorScheme.onPrimaryContainer else colorScheme.onSecondaryContainer
+                        text = stringResource(detail.status.labelRes),
+                        containerColor = statusTone.containerColor,
+                        contentColor = statusTone.contentColor
                     )
                 }
 
@@ -182,16 +180,9 @@ fun CameraDetailScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedButton(
-                        onClick = callbacks.onRefresh,
-                        modifier = Modifier.weight(0.4f)
-                    ) {
-                        Text(stringResource(R.string.refresh))
-                    }
-
                     FilledTonalButton(
                         onClick = callbacks.onToggleStreaming,
-                        modifier = Modifier.weight(0.6f)
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(if (detail.isStreaming) stringResource(R.string.stop_stream) else stringResource(R.string.start_stream))
                     }

@@ -55,6 +55,8 @@
     <string name="http_port">HTTP ポート</string>
     <string name="apply">適用</string>
     <string name="connection_deck">接続状況</string>
+    <string name="start_all_streams">一括開始</string>
+    <string name="stop_all_streams">一括停止</string>
     <string name="no_camera_sessions_active">まだ利用可能なカメラセッションはありません。</string>
     <string name="ready_short">準備完了</string>
     <string name="locked_short">未許可</string>
@@ -102,4 +104,10 @@
     <string name="preview_requires_streaming">プレビューを有効にする前に配信を開始してください。</string>
     <string name="stop_stream_before_changing_settings">解像度や FPS を変更する前に配信を停止してください。</string>
     <string name="invalid_port">1 から 65535 の有効なポートを入力してください。</string>
+    <string name="preview_state_stream_stopped">配信停止中</string>
+    <string name="preview_state_stream_stopped_body">ローカルプレビューで映像を受け取るには、まず配信を開始してください。</string>
+    <string name="preview_state_disabled">プレビュー無効</string>
+    <string name="preview_state_disabled_body">配信は有効です。プレーヤー上のコントロールでローカルプレビューを有効化できます。</string>
+    <string name="preview_state_waiting">フレーム待機中</string>
+    <string name="preview_state_waiting_body">配信は開始されています。カメラが最初のフレームを送信すると、ここに映像が表示されます。</string>
 </resources>

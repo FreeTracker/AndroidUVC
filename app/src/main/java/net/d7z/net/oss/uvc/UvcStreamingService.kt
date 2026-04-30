@@ -6,11 +6,13 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
+import android.hardware.usb.UsbManager
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import fi.iki.elonen.NanoHTTPD
@@ -53,6 +55,7 @@ class UvcStreamingService : Service() {
         var selectedFpsPos: Int = 0
         var isPreviewEnabled: Boolean = false
         var previewBuffer: ByteArray = ByteArray(0)
+        val attachedAtMs: Long = SystemClock.elapsedRealtime()
 
         val isStreaming: Boolean
             get() = state == SessionState.STREAMING
@@ -72,6 +75,17 @@ class UvcStreamingService : Service() {
     private var lastSentBytes: Long = 0
     private var lastCheckTime = System.currentTimeMillis()
     private val lastServiceFrameCounts = mutableMapOf<Int, Long>()
+
+    companion object {
+        const val FRAME_BUFFER_SIZE_BYTES = 16 * 1024 * 1024
+        private const val DEVICE_SETTLE_MS = 800L
+        private const val FIRST_FRAME_TIMEOUT_MS = 1500L
+        private const val MAX_START_ATTEMPTS = 3
+
+        init {
+            System.loadLibrary("native-lib")
+        }
+    }
     
     private val notificationUpdater = object : Runnable {
         override fun run() {
@@ -328,24 +342,7 @@ class UvcStreamingService : Service() {
         log("USB device opening: ${describeUsbDevice(device)}")
         Thread {
             try {
-                val fd = connection.fileDescriptor
-                log("USB connection opened: device=${device.deviceName}, fd=$fd, rawDescriptors=${connection.rawDescriptors?.size ?: 0}")
-                val formatStr = getDeviceSupportedFormats(fd)
-                if (formatStr.isNullOrEmpty()) {
-                    connection.close()
-                    log("FAIL: Could not load formats for ${device.productName}.")
-                    return@Thread
-                }
-                val index = allocateCameraIndex()
-                val session = CameraSession(index, fd, device, connection)
-                session.supportedFormats = formatStr
-                sessionsByFd[fd] = session
-                sessionsByIndex[index] = session
-                updateStatsAndNotificationAsync()
-                log("Cam $index assigned and ready: ${device.productName}. URL: /camera/$index")
-                log("Cam $index formats: $formatStr")
-                onSessionCreatedListener?.invoke(session)
-                onSessionsChangedListener?.invoke()
+                createSession(device, connection)
             } finally {
                 initializingDevices.remove(device.deviceName)
             }
@@ -369,24 +366,99 @@ class UvcStreamingService : Service() {
                 return@Thread
             }
 
-            log("Cam ${session.index} start requested: ${width}x$height@$fps, bufferCap=${session.buffer.capacity()}")
-            val started = startUVC(fd, session.buffer, width, height, fps)
+            val (activeSession, started) = startStreamingWithRecovery(session, width, height, fps)
 
-            synchronized(session.stateLock) {
-                if (session.state == SessionState.STARTING) {
-                    session.state = if (started) SessionState.STREAMING else SessionState.IDLE
+            synchronized(activeSession.stateLock) {
+                if (activeSession.state == SessionState.STARTING) {
+                    activeSession.state = if (started) SessionState.STREAMING else SessionState.IDLE
+                }
+            }
+
+            if (activeSession !== session) {
+                synchronized(session.stateLock) {
+                    if (session.state == SessionState.STARTING) {
+                        session.state = SessionState.IDLE
+                    }
                 }
             }
 
             updateStatsAndNotificationAsync()
             if (started) {
-                log("Cam ${session.index} Streaming Started.")
+                log("Cam ${activeSession.index} Streaming Started.")
             } else {
-                log("FAIL: Cam ${session.index} failed to start streaming.")
+                log("FAIL: Cam ${activeSession.index} failed to start streaming.")
             }
             onSessionsChangedListener?.invoke()
             onComplete?.invoke()
         }.start()
+    }
+
+    private fun startStreamingWithRecovery(
+        initialSession: CameraSession,
+        width: Int,
+        height: Int,
+        fps: Int
+    ): Pair<CameraSession, Boolean> {
+        var activeSession = initialSession
+
+        repeat(MAX_START_ATTEMPTS) { attempt ->
+            waitForDeviceSettle(activeSession)
+
+            log(
+                "Cam ${activeSession.index} start requested: ${width}x$height@$fps, " +
+                    "bufferCap=${activeSession.buffer.capacity()}, attempt=${attempt + 1}/$MAX_START_ATTEMPTS"
+            )
+
+            val started = startUVC(activeSession.fd, activeSession.buffer, width, height, fps)
+            if (started) {
+                if (awaitFirstFrame(activeSession, FIRST_FRAME_TIMEOUT_MS)) {
+                    return activeSession to true
+                }
+
+                log("FAIL: Cam ${activeSession.index} start returned success but no frame arrived within ${FIRST_FRAME_TIMEOUT_MS}ms.")
+                stopUVC(activeSession.fd)
+            }
+
+            if (attempt == MAX_START_ATTEMPTS - 1) {
+                return activeSession to false
+            }
+
+            val recoveredSession = recoverSessionForStreaming(activeSession) ?: return activeSession to false
+            activeSession = recoveredSession
+        }
+
+        return activeSession to false
+    }
+
+    private fun waitForDeviceSettle(session: CameraSession) {
+        val remaining = session.attachedAtMs + DEVICE_SETTLE_MS - SystemClock.elapsedRealtime()
+        if (remaining > 0) {
+            log("Cam ${session.index} waiting ${remaining}ms for USB settle.")
+            Thread.sleep(remaining)
+        }
+    }
+
+    private fun awaitFirstFrame(session: CameraSession, timeoutMs: Long): Boolean {
+        if (session.frameCount.get() > 0) {
+            return true
+        }
+
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        synchronized(session.frameLock) {
+            while (session.frameCount.get() <= 0) {
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                if (remaining <= 0) {
+                    return false
+                }
+                try {
+                    session.frameLock.wait(remaining)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return false
+                }
+            }
+        }
+        return true
     }
 
     fun stopStreaming(fd: Int, onComplete: (() -> Unit)? = null) {
@@ -432,16 +504,88 @@ class UvcStreamingService : Service() {
         }
         if (!shouldRelease) return
 
-        log("Cam ${session.index} releasing: state=${session.state}, fd=$fd, device=${session.device.deviceName}")
-        releaseUVC(fd)
-        sessionsByFd.remove(fd)
-        sessionsByIndex.remove(session.index)
-        releaseCameraIndex(session.index)
-        lastServiceFrameCounts.remove(fd)
+        releaseSession(session, releaseIndex = true, notify = true)
+    }
+
+    private fun createSession(
+        device: UsbDevice,
+        connection: UsbDeviceConnection,
+        fixedIndex: Int? = null,
+        selectedResPos: Int = 0,
+        selectedFpsPos: Int = 0
+    ): CameraSession? {
+        val fd = connection.fileDescriptor
+        log("USB connection opened: device=${device.deviceName}, fd=$fd, rawDescriptors=${connection.rawDescriptors?.size ?: 0}")
+        val formatStr = getDeviceSupportedFormats(fd)
+        if (formatStr.isEmpty()) {
+            connection.close()
+            log("FAIL: Could not load formats for ${device.productName}.")
+            return null
+        }
+
+        val index = fixedIndex ?: allocateCameraIndex()
+        val session = CameraSession(index, fd, device, connection).apply {
+            supportedFormats = formatStr
+            this.selectedResPos = selectedResPos
+            this.selectedFpsPos = selectedFpsPos
+        }
+        sessionsByFd[fd] = session
+        sessionsByIndex[index] = session
+        updateStatsAndNotificationAsync()
+        log("Cam $index assigned and ready: ${device.productName}. URL: /camera/$index")
+        log("Cam $index formats: $formatStr")
+        onSessionCreatedListener?.invoke(session)
+        onSessionsChangedListener?.invoke()
+        return session
+    }
+
+    private fun recoverSessionForStreaming(session: CameraSession): CameraSession? {
+        log("Cam ${session.index} start failed, rebuilding native session for ${session.device.deviceName}")
+        releaseSession(session, releaseIndex = false, notify = false)
+
+        val reopenedConnection = (getSystemService(Context.USB_SERVICE) as UsbManager).openDevice(session.device)
+        if (reopenedConnection == null) {
+            log("FAIL: Cam ${session.index} could not reopen USB connection after start failure.")
+            releaseCameraIndex(session.index)
+            return null
+        }
+
+        val replacement = createSession(
+            device = session.device,
+            connection = reopenedConnection,
+            fixedIndex = session.index,
+            selectedResPos = session.selectedResPos,
+            selectedFpsPos = session.selectedFpsPos
+        )
+
+        if (replacement == null) {
+            releaseCameraIndex(session.index)
+            return null
+        }
+
+        synchronized(replacement.stateLock) {
+            replacement.state = SessionState.STARTING
+        }
+        return replacement
+    }
+
+    private fun releaseSession(session: CameraSession, releaseIndex: Boolean, notify: Boolean) {
+        log("Cam ${session.index} releasing: state=${session.state}, fd=${session.fd}, device=${session.device.deviceName}")
+        releaseUVC(session.fd)
+        sessionsByFd.remove(session.fd)
+        if (sessionsByIndex[session.index]?.fd == session.fd) {
+            sessionsByIndex.remove(session.index)
+        }
+        if (releaseIndex) {
+            releaseCameraIndex(session.index)
+        }
+        lastServiceFrameCounts.remove(session.fd)
         session.connection.close()
         updateStatsAndNotificationAsync()
         log("Detached Cam ${session.index}")
-        onSessionsChangedListener?.invoke()
+        if (notify) {
+            onSessionsChangedListener?.invoke()
+        }
     }
 
     // Native 回调
@@ -620,11 +764,4 @@ class UvcStreamingService : Service() {
     external fun startUVC(fd: Int, buffer: ByteBuffer, width: Int, height: Int, fps: Int): Boolean
     external fun stopUVC(fd: Int)
     external fun releaseUVC(fd: Int)
-    companion object {
-        const val FRAME_BUFFER_SIZE_BYTES = 16 * 1024 * 1024
-
-        init {
-            System.loadLibrary("native-lib")
-        }
-    }
 }

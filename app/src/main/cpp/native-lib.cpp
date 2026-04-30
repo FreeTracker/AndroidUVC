@@ -10,6 +10,9 @@
 #include <mutex>
 #include <memory>
 #include <chrono>
+#include <set>
+#include <tuple>
+#include <vector>
 
 extern "C" {
     #include <libusb.h>
@@ -76,6 +79,23 @@ void shutdown_usb_ctx_if_idle() {
     }
 }
 
+void release_claimed_stream_interfaces(uvc_device_handle_t *devh, int fd) {
+    if (!devh || !devh->info) {
+        return;
+    }
+
+    const auto control_if = devh->info->ctrl_if.bInterfaceNumber;
+    for (int if_idx = 0; if_idx < 32; ++if_idx) {
+        const auto mask = (1u << if_idx);
+        if (!(devh->claimed & mask) || if_idx == control_if) {
+            continue;
+        }
+
+        LOGI("Native[%d]: Releasing leftover claimed stream interface %d", fd, if_idx);
+        uvc_release_if(devh, if_idx);
+    }
+}
+
 struct CameraContext {
     int fd;
     uvc_context_t *uvc_ctx = nullptr;
@@ -101,12 +121,13 @@ struct CameraContext {
             std::lock_guard<std::mutex> lock(uvc_mutex);
             if (devh) {
                 uvc_stop_streaming(devh);
+                release_claimed_stream_interfaces(devh, fd);
                 uvc_close(devh);
                 devh = nullptr;
             }
 
             if (dev) {
-                free(dev);
+                uvc_unref_device(dev);
                 dev = nullptr;
             }
             if (uvc_ctx) {
@@ -142,6 +163,90 @@ std::shared_ptr<CameraContext> get_camera_context(int fd) {
         return it->second;
     }
     return nullptr;
+}
+
+uvc_error_t negotiate_mjpeg_stream_ctrl(
+        uvc_device_handle_t *devh,
+        uvc_stream_ctrl_t *ctrl,
+        int fd,
+        int width,
+        int height,
+        int fps) {
+    if (!devh || !ctrl) {
+        return UVC_ERROR_INVALID_PARAM;
+    }
+
+    std::vector<std::tuple<uint8_t, uint8_t, uint8_t, uint32_t>> candidates;
+    const uvc_format_desc_t *format_desc = uvc_get_format_descs(devh);
+    while (format_desc) {
+        char fourcc[5] = {0};
+        memcpy(fourcc, format_desc->fourccFormat, 4);
+        if (strcmp(fourcc, "MJPG") == 0) {
+            const uvc_frame_desc_t *frame_desc = format_desc->frame_descs;
+            while (frame_desc) {
+                if (frame_desc->wWidth == width && frame_desc->wHeight == height && frame_desc->intervals) {
+                    for (uint32_t *interval = frame_desc->intervals; *interval; ++interval) {
+                        const auto current_fps = static_cast<int>(10000000 / *interval);
+                        if (fps == 0 || current_fps == fps) {
+                            candidates.emplace_back(
+                                    format_desc->bFormatIndex,
+                                    frame_desc->bFrameIndex,
+                                    format_desc->parent->bInterfaceNumber,
+                                    *interval);
+                        }
+                    }
+                }
+                frame_desc = frame_desc->next;
+            }
+        }
+        format_desc = format_desc->next;
+    }
+
+    if (candidates.empty()) {
+        return UVC_ERROR_INVALID_MODE;
+    }
+
+    uvc_error_t last_error = UVC_ERROR_INVALID_MODE;
+    for (const auto &candidate : candidates) {
+        memset(ctrl, 0, sizeof(*ctrl));
+        ctrl->bFormatIndex = std::get<0>(candidate);
+        ctrl->bFrameIndex = std::get<1>(candidate);
+        ctrl->bInterfaceNumber = std::get<2>(candidate);
+        ctrl->dwFrameInterval = std::get<3>(candidate);
+        ctrl->bmHint = (1 << 0);
+
+        uvc_claim_if(devh, ctrl->bInterfaceNumber);
+        uvc_query_stream_ctrl(devh, ctrl, 1, UVC_GET_MAX);
+
+        ctrl->bFormatIndex = std::get<0>(candidate);
+        ctrl->bFrameIndex = std::get<1>(candidate);
+        ctrl->bInterfaceNumber = std::get<2>(candidate);
+        ctrl->dwFrameInterval = std::get<3>(candidate);
+        ctrl->bmHint = (1 << 0);
+
+        LOGI("Native[%d]: Probing MJPEG candidate fmt=%u frame=%u if=%u interval=%u (~%d fps)",
+             fd,
+             static_cast<unsigned>(ctrl->bFormatIndex),
+             static_cast<unsigned>(ctrl->bFrameIndex),
+             static_cast<unsigned>(ctrl->bInterfaceNumber),
+             static_cast<unsigned>(ctrl->dwFrameInterval),
+             ctrl->dwFrameInterval ? static_cast<int>(10000000 / ctrl->dwFrameInterval) : 0);
+
+        const auto res = uvc_probe_stream_ctrl(devh, ctrl);
+        if (res == UVC_SUCCESS) {
+            return UVC_SUCCESS;
+        }
+
+        LOGE("Native[%d]: Candidate fmt=%u frame=%u probe failed: %s",
+             fd,
+             static_cast<unsigned>(ctrl->bFormatIndex),
+             static_cast<unsigned>(ctrl->bFrameIndex),
+             uvc_strerror(res));
+        uvc_release_if(devh, ctrl->bInterfaceNumber);
+        last_error = res;
+    }
+
+    return last_error;
 }
 
 void refresh_java_callback(JNIEnv *env, jobject thiz) {
@@ -197,6 +302,8 @@ void frame_callback(uvc_frame_t *frame, void *ptr) {
             if (env->ExceptionCheck()) {
                 env->ExceptionClear();
             }
+        } else {
+            LOGE("Native[%d]: Frame arrived but Java callback is not attached", ctx->fd);
         }
     }
 
@@ -265,6 +372,7 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
     ctx->dev = (uvc_device_t *)calloc(1, sizeof(uvc_device_t));
     ctx->dev->ctx = ctx->uvc_ctx;
     ctx->dev->usb_dev = libusb_get_device(usb_handle);
+    libusb_ref_device(ctx->dev->usb_dev);
     ctx->dev->ref = 1;
 
     libusb_device_descriptor desc{};
@@ -286,6 +394,7 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
     }
 
     std::stringstream ss;
+    std::set<std::string> seen_modes;
     const uvc_format_desc_t *format_desc = uvc_get_format_descs(ctx->devh);
     while (format_desc) {
         char fourcc[5] = {0};
@@ -298,16 +407,20 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
                 std::stringstream frame_log;
                 frame_log << "Native[" << fd << "]: MJPEG frame "
                           << frame_desc->wWidth << "x" << frame_desc->wHeight << " fps=";
-                ss << frame_desc->wWidth << "x" << frame_desc->wHeight << ":";
+                std::stringstream mode_ss;
+                mode_ss << frame_desc->wWidth << "x" << frame_desc->wHeight << ":";
                 if (frame_desc->intervals) {
                     for (uint32_t *interval = frame_desc->intervals; *interval; ++interval) {
                         const auto current_fps = (10000000 / *interval);
-                        ss << current_fps << ( (*(interval+1)) ? "," : "" );
+                        mode_ss << current_fps << ( (*(interval+1)) ? "," : "" );
                         frame_log << current_fps << ( (*(interval+1)) ? "," : "" );
                     }
                 }
                 LOGI("%s", frame_log.str().c_str());
-                ss << ";";
+                const auto mode = mode_ss.str();
+                if (seen_modes.insert(mode).second) {
+                    ss << mode << ";";
+                }
                 frame_desc = frame_desc->next;
             }
         }
@@ -362,7 +475,7 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_startUVC(JNIEnv *env, jobject thiz,
     if (ctx->cleaned_up || !ctx->devh) return JNI_FALSE;
 
     uvc_stream_ctrl_t ctrl;
-    uvc_error_t res = uvc_get_stream_ctrl_format_size(ctx->devh, &ctrl, UVC_FRAME_FORMAT_MJPEG, width, height, fps);
+    uvc_error_t res = negotiate_mjpeg_stream_ctrl(ctx->devh, &ctrl, fd, width, height, fps);
     
     if (res != UVC_SUCCESS) {
         LOGE("Native[%d]: Failed to get stream ctrl (%s), retrying...", fd, uvc_strerror(res));
@@ -370,7 +483,7 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_startUVC(JNIEnv *env, jobject thiz,
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         uvc_lock.lock();
         if (ctx->cleaned_up || !ctx->devh) return JNI_FALSE;
-        res = uvc_get_stream_ctrl_format_size(ctx->devh, &ctrl, UVC_FRAME_FORMAT_MJPEG, width, height, fps);
+        res = negotiate_mjpeg_stream_ctrl(ctx->devh, &ctrl, fd, width, height, fps);
     }
 
     if (res == UVC_SUCCESS) {
@@ -419,13 +532,4 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_releaseUVC(JNIEnv *env, jobject thi
         }
     }
 
-    bool no_cameras = false;
-    {
-        std::lock_guard<std::mutex> lock(g_map_mutex);
-        no_cameras = g_camera_map.empty();
-    }
-    if (no_cameras) {
-        clear_java_callback(env);
-        shutdown_usb_ctx_if_idle();
-    }
 }

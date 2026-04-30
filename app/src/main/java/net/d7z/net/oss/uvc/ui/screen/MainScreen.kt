@@ -39,6 +39,7 @@ import net.d7z.net.oss.uvc.R
 import net.d7z.net.oss.uvc.ui.component.DrawerCameraItem
 import net.d7z.net.oss.uvc.ui.component.DrawerMetricChip
 import net.d7z.net.oss.uvc.ui.component.PreviewHeroCard
+import net.d7z.net.oss.uvc.ui.model.CameraUiStatus
 import net.d7z.net.oss.uvc.ui.model.Destination
 import net.d7z.net.oss.uvc.ui.model.MainUiCallbacks
 import net.d7z.net.oss.uvc.ui.model.MainUiState
@@ -56,6 +57,27 @@ fun MainScreen(
     val wideLayout = configuration.screenWidthDp >= 900
     val selectedName = (state.currentDestination as? Destination.Camera)?.deviceName
     val onHome = state.currentDestination == Destination.Home
+    val cameraDetail = state.cameraDetail
+
+    val heroTitle = when {
+        cameraDetail == null -> ""
+        !cameraDetail.isStreaming -> stringResource(R.string.preview_state_stream_stopped)
+        !cameraDetail.isPreviewEnabled -> stringResource(R.string.preview_state_disabled)
+        state.previewBitmap == null -> stringResource(R.string.preview_state_waiting)
+        else -> cameraDetail.title
+    }
+    val heroSubtitle = when {
+        cameraDetail == null -> ""
+        !cameraDetail.isStreaming -> stringResource(R.string.preview_state_stream_stopped_body)
+        !cameraDetail.isPreviewEnabled -> stringResource(R.string.preview_state_disabled_body)
+        state.previewBitmap == null -> stringResource(R.string.preview_state_waiting_body)
+        else -> cameraDetail.subtitle
+    }
+    val previewStatus = when {
+        cameraDetail == null -> CameraUiStatus.Discovered
+        cameraDetail.isStreaming -> CameraUiStatus.Streaming
+        else -> cameraDetail.status
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -131,9 +153,11 @@ fun MainScreen(
                 if (!onHome) {
                     PreviewHeroCard(
                         bitmap = state.previewBitmap,
-                        title = state.previewTitle,
-                        subtitle = state.previewSubtitle,
-                        isStreaming = state.cameraDetail?.isStreaming == true,
+                        cardTitle = state.previewTitle,
+                        cardSubtitle = state.previewSubtitle,
+                        heroTitle = heroTitle,
+                        heroSubtitle = heroSubtitle,
+                        status = previewStatus,
                         previewEnabled = state.cameraDetail?.isPreviewEnabled == true,
                         showPreviewControl = true,
                         onTogglePreview = {

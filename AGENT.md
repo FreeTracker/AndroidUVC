@@ -43,6 +43,5 @@ This project is a high-performance Android application for streaming UVC (USB Vi
 
 - `app/src/main/java/net/d7z/net/oss/uvc/`: Kotlin source code.
 - `app/src/main/cpp/`: Native C++ source using `libuvc`.
-- `app/src/main/res/layout/`: Material 3 XML layouts.
 - `app/src/main/res/values/`: Default (English) strings and themes.
 - `app/src/main/res/values-zh/`: Chinese translations.

@@ -55,6 +55,8 @@
     <string name="http_port">HTTP 端口</string>
     <string name="apply">应用</string>
     <string name="connection_deck">连接状态</string>
+    <string name="start_all_streams">一键启动</string>
+    <string name="stop_all_streams">一键停止</string>
     <string name="no_camera_sessions_active">当前还没有可用的摄像头会话。</string>
     <string name="ready_short">就绪</string>
     <string name="locked_short">未授权</string>
@@ -102,4 +104,10 @@
     <string name="preview_requires_streaming">请先开始推流，再开启预览。</string>
     <string name="stop_stream_before_changing_settings">请先停止推流，再修改分辨率或帧率。</string>
     <string name="invalid_port">请输入 1 到 65535 之间的有效端口。</string>
+    <string name="preview_state_stream_stopped">推流已停止</string>
+    <string name="preview_state_stream_stopped_body">启动推流后，本地预览才会接收并显示画面帧。</string>
+    <string name="preview_state_disabled">预览已关闭</string>
+    <string name="preview_state_disabled_body">当前推流已开启，使用播放器控件即可启用本地预览。</string>
+    <string name="preview_state_waiting">正在等待画面帧</string>
+    <string name="preview_state_waiting_body">推流已经启动，摄像头一旦送出首帧，画面就会显示在这里。</string>
 </resources>

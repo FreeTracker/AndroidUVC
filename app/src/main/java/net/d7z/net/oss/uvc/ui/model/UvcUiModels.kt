@@ -15,13 +15,19 @@ sealed interface Destination {
     data class Camera(val deviceName: String) : Destination
 }
 
+enum class CameraUiStatus(@param:StringRes val labelRes: Int) {
+    Streaming(R.string.live_short),
+    Ready(R.string.ready_short),
+    Locked(R.string.locked_short),
+    Discovered(R.string.discovered_short)
+}
+
 data class CameraNavItem(
     val deviceName: String,
     val title: String,
     val subtitle: String,
     val cameraIndex: Int?,
-    val isStreaming: Boolean,
-    val hasPermission: Boolean
+    val status: CameraUiStatus
 )
 
 data class CameraDetailUi(
@@ -29,7 +35,7 @@ data class CameraDetailUi(
     val title: String,
     val subtitle: String,
     val cameraIndex: Int?,
-    val status: String,
+    val status: CameraUiStatus,
     val isStreaming: Boolean,
     val isPreviewEnabled: Boolean,
     val resolutionOptions: List<String>,
@@ -77,6 +83,8 @@ data class MainUiState(
 data class MainUiCallbacks(
     val onOpenDrawer: () -> Unit,
     val onRefresh: () -> Unit,
+    val onStartAllStreaming: () -> Unit,
+    val onStopAllStreaming: () -> Unit,
     val onSelectHome: () -> Unit,
     val onSelectCamera: (String) -> Unit,
     val onApplyPort: () -> Unit,

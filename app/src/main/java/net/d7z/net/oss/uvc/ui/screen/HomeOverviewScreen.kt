@@ -22,6 +22,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -33,6 +34,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import net.d7z.net.oss.uvc.R
 import net.d7z.net.oss.uvc.ui.component.EventLogPanel
+import net.d7z.net.oss.uvc.ui.component.rememberStatusTone
 import net.d7z.net.oss.uvc.ui.component.StatusChip
 import net.d7z.net.oss.uvc.ui.component.SummaryCard
 import net.d7z.net.oss.uvc.ui.model.MainUiCallbacks
@@ -45,7 +47,6 @@ fun HomeOverviewScreen(
     callbacks: MainUiCallbacks,
     modifier: Modifier = Modifier
 ) {
-    val colorScheme = MaterialTheme.colorScheme
     Column(
         modifier = modifier
             .verticalScroll(rememberScrollState())
@@ -116,6 +117,25 @@ fun HomeOverviewScreen(
             Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text(stringResource(R.string.connection_deck), style = MaterialTheme.typography.titleLarge, fontFamily = FontFamily.Serif)
                 Text(state.streamStatusText, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    FilledTonalButton(
+                        onClick = callbacks.onStartAllStreaming,
+                        modifier = Modifier.weight(1f),
+                        enabled = state.connectedCount > state.streamingCount
+                    ) {
+                        Text(stringResource(R.string.start_all_streams))
+                    }
+                    OutlinedButton(
+                        onClick = callbacks.onStopAllStreaming,
+                        modifier = Modifier.weight(1f),
+                        enabled = state.streamingCount > 0
+                    ) {
+                        Text(stringResource(R.string.stop_all_streams))
+                    }
+                }
                 if (state.cameraNavItems.isEmpty()) {
                     Text(stringResource(R.string.no_camera_sessions_active), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
@@ -129,23 +149,12 @@ fun HomeOverviewScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                val statusTone = rememberStatusTone(item.status)
                                 Text(item.title, fontFamily = FontFamily.Serif)
                                 StatusChip(
-                                    text = when {
-                                        item.isStreaming -> stringResource(R.string.live_short)
-                                        item.hasPermission -> stringResource(R.string.ready_short)
-                                        else -> stringResource(R.string.locked_short)
-                                    },
-                                    containerColor = when {
-                                        item.isStreaming -> colorScheme.primaryContainer
-                                        item.hasPermission -> colorScheme.tertiaryContainer
-                                        else -> colorScheme.errorContainer
-                                    },
-                                    contentColor = when {
-                                        item.isStreaming -> colorScheme.onPrimaryContainer
-                                        item.hasPermission -> colorScheme.onTertiaryContainer
-                                        else -> colorScheme.onErrorContainer
-                                    }
+                                    text = stringResource(item.status.labelRes),
+                                    containerColor = statusTone.containerColor,
+                                    contentColor = statusTone.contentColor
                                 )
                             }
                             Text(

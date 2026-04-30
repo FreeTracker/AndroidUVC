@@ -26,6 +26,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import net.d7z.net.oss.uvc.ui.model.CameraDetailUi
 import net.d7z.net.oss.uvc.ui.model.CameraNavItem
+import net.d7z.net.oss.uvc.ui.model.CameraUiStatus
 import net.d7z.net.oss.uvc.ui.model.Destination
 import net.d7z.net.oss.uvc.ui.model.MainUiCallbacks
 import net.d7z.net.oss.uvc.ui.model.MainUiState
@@ -78,6 +79,8 @@ class MainActivity : AppCompatActivity() {
     private val callbacks = MainUiCallbacks(
         onOpenDrawer = {},
         onRefresh = { refreshDeviceList() },
+        onStartAllStreaming = { startAllStreaming() },
+        onStopAllStreaming = { stopAllStreaming() },
         onSelectHome = { selectHome() },
         onSelectCamera = { selectCamera(it) },
         onApplyPort = { applyHttpPort() },
@@ -252,7 +255,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 sortedIndices.forEach { idx ->
                     val session = service.sessionsByIndex[idx] ?: return@forEach
-                    val status = if (session.isStreaming) getString(R.string.streaming_status) else getString(R.string.idle_status)
+                    val status = if (session.isStreaming) getString(R.string.streaming_status) else getString(R.string.ready_short)
                     append("#$idx[$status] ")
                 }
             }
@@ -267,16 +270,23 @@ class MainActivity : AppCompatActivity() {
                     append(device.productName ?: device.deviceName.takeLast(8))
                     append(" • ")
                     append(
-                        when {
-                            session?.isStreaming == true -> getString(R.string.live_short)
-                            session != null -> getString(R.string.ready_short)
-                            else -> getString(R.string.discovered_short)
-                        }
+                        getString(
+                            when {
+                                session?.isStreaming == true -> CameraUiStatus.Streaming.labelRes
+                                session != null -> CameraUiStatus.Ready.labelRes
+                                !(getSystemService(Context.USB_SERVICE) as UsbManager).hasPermission(device) -> CameraUiStatus.Locked.labelRes
+                                else -> CameraUiStatus.Discovered.labelRes
+                            }
+                        )
                     )
                 },
                 cameraIndex = session?.index,
-                isStreaming = session?.isStreaming == true,
-                hasPermission = (getSystemService(Context.USB_SERVICE) as UsbManager).hasPermission(device)
+                status = when {
+                    session?.isStreaming == true -> CameraUiStatus.Streaming
+                    session != null -> CameraUiStatus.Ready
+                    !(getSystemService(Context.USB_SERVICE) as UsbManager).hasPermission(device) -> CameraUiStatus.Locked
+                    else -> CameraUiStatus.Discovered
+                }
             )
         }.sortedWith(compareBy<CameraNavItem> { it.cameraIndex ?: Int.MAX_VALUE }.thenBy { it.title })
 
@@ -328,8 +338,15 @@ class MainActivity : AppCompatActivity() {
         val resolutionMap = parseResolutionMap(session.supportedFormats)
         val resolutions = resolutionMap.keys.toList()
         val selectedResolutionIndex = session.selectedResPos.coerceIn(0, (resolutions.size - 1).coerceAtLeast(0))
+        if (session.selectedResPos != selectedResolutionIndex) {
+            session.selectedResPos = selectedResolutionIndex
+            session.selectedFpsPos = 0
+        }
         val fpsOptions = if (resolutions.isNotEmpty()) resolutionMap[resolutions[selectedResolutionIndex]].orEmpty() else emptyList()
         val selectedFpsIndex = session.selectedFpsPos.coerceIn(0, (fpsOptions.size - 1).coerceAtLeast(0))
+        if (session.selectedFpsPos != selectedFpsIndex) {
+            session.selectedFpsPos = selectedFpsIndex
+        }
         val port = uiState.currentPortText.toIntOrNull() ?: 8080
         val host = getLocalIpAddress() ?: "0.0.0.0"
         val streamUrl = "http://$host:$port/camera/${session.index}"
@@ -338,7 +355,7 @@ class MainActivity : AppCompatActivity() {
             title = getString(R.string.camera_title_format, session.index),
             subtitle = session.device.productName ?: session.device.deviceName,
             cameraIndex = session.index,
-            status = if (session.isStreaming) getString(R.string.streaming) else getString(R.string.idle),
+            status = if (session.isStreaming) CameraUiStatus.Streaming else CameraUiStatus.Ready,
             isStreaming = session.isStreaming,
             isPreviewEnabled = session.isPreviewEnabled,
             resolutionOptions = resolutions,
@@ -479,9 +496,18 @@ class MainActivity : AppCompatActivity() {
 
         val resolutionMap = parseResolutionMap(session.supportedFormats)
         val resolutions = resolutionMap.keys.toList()
-        val selectedResolution = resolutions.getOrNull(session.selectedResPos)
+        val selectedResolutionIndex = session.selectedResPos.coerceIn(0, (resolutions.size - 1).coerceAtLeast(0))
+        if (session.selectedResPos != selectedResolutionIndex) {
+            session.selectedResPos = selectedResolutionIndex
+            session.selectedFpsPos = 0
+        }
+        val selectedResolution = resolutions.getOrNull(selectedResolutionIndex)
         val fpsOptions = selectedResolution?.let { resolutionMap[it].orEmpty() }.orEmpty()
-        val selectedFps = fpsOptions.getOrNull(session.selectedFpsPos)
+        val selectedFpsIndex = session.selectedFpsPos.coerceIn(0, (fpsOptions.size - 1).coerceAtLeast(0))
+        if (session.selectedFpsPos != selectedFpsIndex) {
+            session.selectedFpsPos = selectedFpsIndex
+        }
+        val selectedFps = fpsOptions.getOrNull(selectedFpsIndex)
 
         if (session.isStreaming) {
             session.isPreviewEnabled = false
@@ -506,6 +532,56 @@ class MainActivity : AppCompatActivity() {
         service.startStreaming(session.fd, width, height, fps) {
             runOnUiThread { updateUiSnapshot() }
         }
+    }
+
+    private fun startAllStreaming() {
+        refreshDeviceList()
+        mainHandler.postDelayed({
+            val service = uvcService ?: return@postDelayed
+            service.sessionsByFd.values
+                .sortedBy { it.index }
+                .filter { !it.isStreaming }
+                .forEach { session ->
+                    val resolutionMap = parseResolutionMap(session.supportedFormats)
+                    val resolutions = resolutionMap.keys.toList()
+                    val selectedResolutionIndex = session.selectedResPos.coerceIn(0, (resolutions.size - 1).coerceAtLeast(0))
+                    if (session.selectedResPos != selectedResolutionIndex) {
+                        session.selectedResPos = selectedResolutionIndex
+                        session.selectedFpsPos = 0
+                    }
+                    val selectedResolution = resolutions.getOrNull(selectedResolutionIndex) ?: return@forEach
+                    val fpsOptions = resolutionMap[selectedResolution].orEmpty()
+                    val selectedFpsIndex = session.selectedFpsPos.coerceIn(0, (fpsOptions.size - 1).coerceAtLeast(0))
+                    if (session.selectedFpsPos != selectedFpsIndex) {
+                        session.selectedFpsPos = selectedFpsIndex
+                    }
+                    val selectedFps = fpsOptions.getOrNull(selectedFpsIndex)?.toIntOrNull() ?: return@forEach
+                    val wh = selectedResolution.split("x")
+                    val width = wh.getOrNull(0)?.toIntOrNull() ?: return@forEach
+                    val height = wh.getOrNull(1)?.toIntOrNull() ?: return@forEach
+                    service.startStreaming(session.fd, width, height, selectedFps) {
+                        runOnUiThread { updateUiSnapshot() }
+                    }
+                }
+        }, 450L)
+    }
+
+    private fun stopAllStreaming() {
+        val service = uvcService ?: return
+        service.sessionsByFd.values
+            .sortedBy { it.index }
+            .filter { it.isStreaming }
+            .forEach { session ->
+                session.isPreviewEnabled = false
+                service.stopStreaming(session.fd) {
+                    runOnUiThread {
+                        if (selectedDeviceName == session.device.deviceName) {
+                            uiState = uiState.copy(previewBitmap = null)
+                        }
+                        updateUiSnapshot()
+                    }
+                }
+            }
     }
 
     private fun applyHttpPort() {

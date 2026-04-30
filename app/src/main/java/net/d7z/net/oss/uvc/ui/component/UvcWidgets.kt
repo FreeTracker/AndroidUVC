@@ -56,7 +56,24 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import net.d7z.net.oss.uvc.R
+import net.d7z.net.oss.uvc.ui.model.CameraUiStatus
 import net.d7z.net.oss.uvc.ui.model.CameraNavItem
+
+data class StatusTone(
+    val containerColor: Color,
+    val contentColor: Color
+)
+
+@Composable
+fun rememberStatusTone(status: CameraUiStatus): StatusTone {
+    val colorScheme = MaterialTheme.colorScheme
+    return when (status) {
+        CameraUiStatus.Streaming -> StatusTone(colorScheme.primaryContainer, colorScheme.onPrimaryContainer)
+        CameraUiStatus.Ready -> StatusTone(colorScheme.tertiaryContainer, colorScheme.onTertiaryContainer)
+        CameraUiStatus.Locked -> StatusTone(colorScheme.errorContainer, colorScheme.onErrorContainer)
+        CameraUiStatus.Discovered -> StatusTone(colorScheme.secondaryContainer, colorScheme.onSecondaryContainer)
+    }
+}
 
 @Composable
 fun DrawerMetricChip(label: String, value: String) {
@@ -72,15 +89,16 @@ fun DrawerMetricChip(label: String, value: String) {
 }
 
 @Composable
-fun CameraStatusGlyph(isStreaming: Boolean, hasPermission: Boolean) {
-    val statusColor = when {
-        !hasPermission -> MaterialTheme.colorScheme.error
-        isStreaming -> MaterialTheme.colorScheme.primary
-        else -> MaterialTheme.colorScheme.outline
+fun CameraStatusGlyph(status: CameraUiStatus) {
+    val statusColor = when (status) {
+        CameraUiStatus.Locked -> MaterialTheme.colorScheme.error
+        CameraUiStatus.Streaming -> MaterialTheme.colorScheme.primary
+        CameraUiStatus.Ready -> MaterialTheme.colorScheme.tertiary
+        CameraUiStatus.Discovered -> MaterialTheme.colorScheme.outline
     }
     Box(contentAlignment = Alignment.Center) {
         Icon(
-            imageVector = if (isStreaming) Icons.Rounded.PlayCircle else Icons.Rounded.SettingsInputHdmi,
+            imageVector = if (status == CameraUiStatus.Streaming) Icons.Rounded.PlayCircle else Icons.Rounded.SettingsInputHdmi,
             contentDescription = null
         )
         Canvas(modifier = Modifier.size(34.dp)) {
@@ -144,15 +162,18 @@ fun SummaryCard(
 @Composable
 fun PreviewHeroCard(
     bitmap: Bitmap?,
-    title: String,
-    subtitle: String,
-    isStreaming: Boolean,
+    cardTitle: String,
+    cardSubtitle: String,
+    heroTitle: String,
+    heroSubtitle: String,
+    status: CameraUiStatus,
     previewEnabled: Boolean,
     showPreviewControl: Boolean,
     onTogglePreview: () -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val darkSurface = colorScheme.surface.luminance() < 0.5f
+    val statusTone = rememberStatusTone(status)
     val previewGradient = if (darkSurface) {
         listOf(
             colorScheme.surfaceVariant,
@@ -168,10 +189,6 @@ fun PreviewHeroCard(
     }
     val placeholderTitleColor = if (darkSurface) colorScheme.onSurface else colorScheme.onPrimaryContainer
     val placeholderBodyColor = placeholderTitleColor.copy(alpha = 0.78f)
-    val liveContainer = if (darkSurface) colorScheme.primaryContainer else Color(0xFFB8F6CA)
-    val liveContent = if (darkSurface) colorScheme.onPrimaryContainer else Color(0xFF12301F)
-    val idleContainer = if (darkSurface) colorScheme.secondaryContainer else Color(0xFFFDE68A)
-    val idleContent = if (darkSurface) colorScheme.onSecondaryContainer else Color(0xFF3D2B00)
     val previewContainer = if (darkSurface) colorScheme.tertiaryContainer else Color(0xFFE0F2FE)
     val previewContent = if (darkSurface) colorScheme.onTertiaryContainer else Color(0xFF0B395D)
     Card(
@@ -207,9 +224,9 @@ fun PreviewHeroCard(
                     ) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             StatusChip(
-                                text = if (isStreaming) stringResource(R.string.live_stream) else stringResource(R.string.standby),
-                                containerColor = if (isStreaming) liveContainer else idleContainer,
-                                contentColor = if (isStreaming) liveContent else idleContent
+                                text = stringResource(status.labelRes),
+                                containerColor = statusTone.containerColor,
+                                contentColor = statusTone.contentColor
                             )
                             StatusChip(
                                 text = if (previewEnabled) stringResource(R.string.preview_armed) else stringResource(R.string.preview_off),
@@ -218,9 +235,9 @@ fun PreviewHeroCard(
                             )
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(title, color = placeholderTitleColor, fontSize = 30.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Serif)
+                            Text(heroTitle, color = placeholderTitleColor, fontSize = 30.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Serif)
                             Text(
-                                subtitle,
+                                heroSubtitle,
                                 color = placeholderBodyColor,
                                 style = MaterialTheme.typography.bodyLarge
                             )
@@ -265,18 +282,18 @@ fun PreviewHeroCard(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text(title, style = MaterialTheme.typography.titleLarge, fontFamily = FontFamily.Serif)
-                    Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+                    Text(cardTitle, style = MaterialTheme.typography.titleLarge, fontFamily = FontFamily.Serif)
+                    Text(cardSubtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                 }
                 FilterChip(
-                    selected = isStreaming,
+                    selected = status == CameraUiStatus.Streaming,
                     onClick = {},
                     enabled = false,
                     modifier = Modifier.padding(start = 12.dp),
-                    label = { Text(if (isStreaming) stringResource(R.string.streaming) else stringResource(R.string.idle)) },
+                    label = { Text(stringResource(status.labelRes)) },
                     colors = FilterChipDefaults.filterChipColors(
-                        disabledContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        disabledLabelColor = MaterialTheme.colorScheme.onSecondaryContainer
+                        disabledContainerColor = statusTone.containerColor,
+                        disabledLabelColor = statusTone.contentColor
                     )
                 )
             }
@@ -325,7 +342,7 @@ fun DrawerCameraItem(
         },
         selected = selected,
         onClick = onClick,
-        icon = { CameraStatusGlyph(isStreaming = item.isStreaming, hasPermission = item.hasPermission) },
+        icon = { CameraStatusGlyph(status = item.status) },
         badge = {
             if (item.cameraIndex != null) {
                 Badge { Text(item.cameraIndex.toString()) }
