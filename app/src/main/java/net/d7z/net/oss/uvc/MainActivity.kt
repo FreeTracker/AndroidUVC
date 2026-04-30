@@ -1,57 +1,56 @@
 package net.d7z.net.oss.uvc
 
-import android.Manifest
 import android.app.PendingIntent
-import android.content.*
-import android.content.pm.PackageManager
-import android.content.res.ColorStateList
+import android.content.BroadcastReceiver
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.ServiceConnection
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Color
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
-import android.net.Uri
-import android.os.*
-import android.provider.Settings
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
 import android.util.Log
-import android.view.View
 import android.view.WindowManager
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
+import android.widget.Toast
+import androidx.activity.compose.setContent
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
-import net.d7z.net.oss.uvc.databinding.ActivityMainBinding
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import net.d7z.net.oss.uvc.ui.model.CameraDetailUi
+import net.d7z.net.oss.uvc.ui.model.CameraNavItem
+import net.d7z.net.oss.uvc.ui.model.Destination
+import net.d7z.net.oss.uvc.ui.model.MainUiCallbacks
+import net.d7z.net.oss.uvc.ui.model.MainUiState
+import net.d7z.net.oss.uvc.ui.screen.MainScreen
+import net.d7z.net.oss.uvc.ui.theme.UvcComposeTheme
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.Collections
+import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var binding: ActivityMainBinding
-    private val ACTION_USB_PERMISSION = "net.d7z.net.oss.uvc.USB_PERMISSION"
+    private val actionUsbPermission = "net.d7z.net.oss.uvc.USB_PERMISSION"
 
     private var uvcService: UvcStreamingService? = null
     private var isBound = false
-    private var currentDevice: UsbDevice? = null
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val decodeExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
-    private val requestingPermissions = mutableSetOf<String>()
-    
-    private val permissionCooldowns = mutableMapOf<String, Long>()
-    private val COOLDOWN_MS = 10000L 
+    private var selectedDeviceName: String? = null
+    private var uiState by mutableStateOf(MainUiState())
 
-    private fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
-        val (height: Int, width: Int) = options.outHeight to options.outWidth
-        var inSampleSize = 1
-        if (height > reqHeight || width > reqWidth) {
-            val halfHeight: Int = height / 2
-            val halfWidth: Int = width / 2
-            while (halfHeight / inSampleSize >= reqHeight && halfWidth / inSampleSize >= reqWidth) {
-                inSampleSize *= 2
-            }
-        }
-        return inSampleSize
-    }
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val decodeExecutor = Executors.newSingleThreadExecutor()
+    private val requestingPermissions = mutableSetOf<String>()
+    private val permissionCooldowns = mutableMapOf<String, Long>()
+    private val cooldownMs = 10_000L
+    private val logLines = mutableListOf<String>()
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -59,96 +58,126 @@ class MainActivity : AppCompatActivity() {
             uvcService = binder.getService()
             isBound = true
             setupServiceListeners()
-            mainHandler.postDelayed({ refreshDeviceList() }, 500)
+            mainHandler.postDelayed({ refreshDeviceList() }, 300)
         }
+
         override fun onServiceDisconnected(name: ComponentName?) {
             isBound = false
             uvcService = null
+            updateUiSnapshot()
         }
     }
 
-    private var lastSentBytes: Long = 0
-    private var lastCheckTime = System.currentTimeMillis()
-
     private val uiUpdater = object : Runnable {
         override fun run() {
-            updateStatsUI()
+            updateUiSnapshot()
             mainHandler.postDelayed(this, 1000)
         }
     }
 
+    private val callbacks = MainUiCallbacks(
+        onOpenDrawer = {},
+        onRefresh = { refreshDeviceList() },
+        onSelectHome = { selectHome() },
+        onSelectCamera = { selectCamera(it) },
+        onApplyPort = { applyHttpPort() },
+        onPortChanged = { value ->
+            uiState = uiState.copy(currentPortText = value.filter(Char::isDigit).take(5))
+        },
+        onTogglePreview = { enabled -> setPreviewEnabled(enabled) },
+        onResolutionSelected = { index -> updateResolutionSelection(index) },
+        onFpsSelected = { index -> updateFpsSelection(index) },
+        onToggleStreaming = { toggleStreaming() },
+        onClearLogs = {
+            logLines.clear()
+            updateUiSnapshot()
+        }
+    )
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Log.d("MainActivity", "onCreate")
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        setSupportActionBar(binding.toolbar)
+        val prefs = getSharedPreferences("uvc_prefs", Context.MODE_PRIVATE)
+        uiState = uiState.copy(currentPortText = prefs.getInt("http_port", 8080).toString())
 
-        initUI()
-        
+        setContent {
+            UvcComposeTheme {
+                MainScreen(state = uiState, callbacks = callbacks)
+            }
+        }
+
         val intent = Intent(this, UvcStreamingService::class.java)
         try {
             startService(intent)
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("MainActivity", "Failed to start service", e)
         }
         bindService(intent, serviceConnection, BIND_AUTO_CREATE)
-
         registerReceivers()
         mainHandler.post(uiUpdater)
-        handleIntent(getIntent())
-    }
-
-    override fun onStart() {
-        super.onStart()
-        Log.d("MainActivity", "onStart")
-    }
-
-    override fun onResume() {
-        super.onResume()
-        Log.d("MainActivity", "onResume")
+        handleIntent(intent)
     }
 
     private fun setupServiceListeners() {
         uvcService?.onLogMessage = { msg -> logToUI(msg) }
         uvcService?.onSessionCreatedListener = { session ->
-            if (session.device.deviceName == currentDevice?.deviceName) {
-                runOnUiThread { restoreCameraUI(session) }
+            runOnUiThread {
+                if (selectedDeviceName == session.device.deviceName &&
+                    uiState.currentDestination is Destination.Camera
+                ) {
+                    uiState = uiState.copy(currentDestination = Destination.Camera(session.device.deviceName))
+                }
+                updateUiSnapshot()
             }
+        }
+        uvcService?.onSessionsChangedListener = {
+            runOnUiThread { updateUiSnapshot() }
         }
         uvcService?.onFrameUpdateListener = { fd, size ->
             val session = uvcService?.sessionsByFd?.get(fd)
-            if (session != null && session.device.deviceName == currentDevice?.deviceName && session.isPreviewEnabled) {
+            val previewTarget = selectedDeviceName
+            val showingCameraPage = uiState.currentDestination is Destination.Camera
+            if (
+                session != null &&
+                showingCameraPage &&
+                session.device.deviceName == previewTarget &&
+                session.isPreviewEnabled
+            ) {
                 if (session.isDecoding.compareAndSet(false, true)) {
-                    val data = ByteArray(size)
+                    val data = synchronized(session.stateLock) {
+                        if (session.previewBuffer.size != size) {
+                            session.previewBuffer = ByteArray(size)
+                        }
+                        session.previewBuffer
+                    }
                     uvcService?.lockBuffer(fd)
                     try {
                         session.buffer.rewind()
-                        session.buffer.get(data)
+                        session.buffer.get(data, 0, size)
                     } finally {
                         uvcService?.unlockBuffer(fd)
                     }
                     if (!decodeExecutor.isShutdown) {
-                        try {
-                            decodeExecutor.execute {
-                                try {
-                                    val options = BitmapFactory.Options()
-                                    options.inJustDecodeBounds = true
-                                    BitmapFactory.decodeByteArray(data, 0, size, options)
-                                    
-                                    val targetW = binding.ivPreview.width.takeIf { it > 0 } ?: 640
-                                    val targetH = binding.ivPreview.height.takeIf { it > 0 } ?: 480
-                                    options.inSampleSize = calculateInSampleSize(options, targetW, targetH)
-                                    options.inJustDecodeBounds = false
-                                    
-                                    val bitmap = BitmapFactory.decodeByteArray(data, 0, size, options)
-                                    bitmap?.let { runOnUiThread { binding.ivPreview.setImageBitmap(it) } }
-                                } catch (e: Exception) {}
-                                finally { session.isDecoding.set(false) }
+                        decodeExecutor.execute {
+                            try {
+                                val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                                BitmapFactory.decodeByteArray(data, 0, size, options)
+                                options.inSampleSize = calculateInSampleSize(options, 1280, 720)
+                                options.inJustDecodeBounds = false
+                                val bitmap = BitmapFactory.decodeByteArray(data, 0, size, options)
+                                runOnUiThread {
+                                    if (
+                                        uiState.currentDestination is Destination.Camera &&
+                                        selectedDeviceName == session.device.deviceName &&
+                                        session.isPreviewEnabled
+                                    ) {
+                                        uiState = uiState.copy(previewBitmap = bitmap)
+                                    }
+                                }
+                            } catch (_: Exception) {
+                            } finally {
+                                session.isDecoding.set(false)
                             }
-                        } catch (e: Exception) {
-                            session.isDecoding.set(false)
                         }
                     } else {
                         session.isDecoding.set(false)
@@ -158,314 +187,346 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateStatsUI() {
-        val service = uvcService ?: return
-        
-        val mbps = service.currentBandwidthMbps
-        val avgFps = service.currentAvgFps
-        
-        binding.tvBandwidth.text = getString(R.string.bandwidth_label, mbps)
-        binding.tvTotalFps.text = getString(R.string.avg_fps_label, avgFps)
-        
-        val ip = getLocalIpAddress() ?: "0.0.0.0"
-        val port = binding.etHttpPort.text.toString().toIntOrNull() ?: 8080
-        binding.tvHttpUrl.text = getString(R.string.web_url_label, ip, port)
-
-        val status = StringBuilder(getString(R.string.streams_prefix))
-        val sortedIndices = service.sessionsByIndex.keys().toList().sorted()
-        if (sortedIndices.isEmpty()) {
-            status.append(getString(R.string.none))
-        } else {
-            sortedIndices.forEach { idx ->
-                val s = service.sessionsByIndex[idx]!!
-                val statusStr = if(s.isStreaming) getString(R.string.streaming_status) else getString(R.string.idle_status)
-                status.append("#$idx[$statusStr] ")
+    private fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
+        val height = options.outHeight
+        val width = options.outWidth
+        var inSampleSize = 1
+        if (height > reqHeight || width > reqWidth) {
+            var halfHeight = height / 2
+            var halfWidth = width / 2
+            while (halfHeight / inSampleSize >= reqHeight && halfWidth / inSampleSize >= reqWidth) {
+                inSampleSize *= 2
             }
         }
-        binding.tvServerStatus.text = status.toString()
+        return inSampleSize
     }
 
     private fun logToUI(msg: String) {
         Log.d("UVC_APP", msg)
         runOnUiThread {
-            binding.tvLog.append("${System.currentTimeMillis() % 100000}: $msg\n")
-            binding.svLog.post { binding.svLog.fullScroll(View.FOCUS_DOWN) }
+            logLines.add(0, "${System.currentTimeMillis() % 100000}: $msg")
+            while (logLines.size > 120) {
+                logLines.removeLast()
+            }
+            updateUiSnapshot()
         }
     }
 
-    private fun initUI() {
-        binding.btnRefresh.setOnClickListener { refreshDeviceList() }
-        binding.btnStreamToggle.setOnClickListener { toggleStreaming() }
-        binding.actvDevices.setOnItemClickListener { _, _, pos, _ ->
-            val devices = getUvcDevices()
-            if (pos < devices.size) openDevice(devices[pos])
-        }
-        binding.swPreview.setOnCheckedChangeListener { _, isChecked ->
-            val dev = currentDevice ?: return@setOnCheckedChangeListener
-            uvcService?.sessionsByFd?.values?.find { it.device.deviceName == dev.deviceName }?.let { session ->
-                session.isPreviewEnabled = isChecked
-                updatePreviewVisibility(session)
-            }
-        }
-        
-        val prefs = getSharedPreferences("uvc_prefs", Context.MODE_PRIVATE)
-        val savedPort = prefs.getInt("http_port", 8080)
-        binding.etHttpPort.setText(savedPort.toString())
-        
-        binding.etHttpPort.setOnFocusChangeListener { _, hasFocus ->
-            if (!hasFocus) {
-                val newPort = binding.etHttpPort.text.toString().toIntOrNull() ?: 8080
-                prefs.edit().putInt("http_port", newPort).apply()
-                uvcService?.updateHttpPort(newPort)
-            }
-        }
+    private fun showToast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 
-    private fun updatePreviewVisibility(session: UvcStreamingService.CameraSession) {
-        if (session.isPreviewEnabled) {
-            binding.ivPreview.visibility = View.VISIBLE
-            binding.tvPreviewOffHint.visibility = View.GONE
-        } else {
-            binding.ivPreview.visibility = View.INVISIBLE
-            binding.ivPreview.setImageResource(0)
-            binding.tvPreviewOffHint.visibility = View.VISIBLE
+    private fun updateUiSnapshot() {
+        val service = uvcService
+        val devices = getUvcDevices()
+        val connectedCount = devices.size
+        val currentPortText = uiState.currentPortText
+        val currentDestination = uiState.currentDestination
+
+        if (service == null) {
+            uiState = uiState.copy(
+                currentDestination = Destination.Home,
+                cameraNavItems = emptyList(),
+                cameraDetail = null,
+                previewBitmap = null,
+                bandwidthText = "0.0 Mbps",
+                avgFpsText = "0.0",
+                httpUrlText = "http://0.0.0.0:${currentPortText.toIntOrNull() ?: 8080}",
+                streamStatusText = "STREAMS: NONE",
+                connectedCount = connectedCount,
+                streamingCount = 0,
+                logLines = logLines.toList()
+            )
+            return
         }
+
+        val streamingCount = service.sessionsByFd.values.count { it.isStreaming }
+        val bandwidthText = getString(R.string.bandwidth_label, service.currentBandwidthMbps)
+        val avgFpsText = getString(R.string.avg_fps_label, service.currentAvgFps)
+        val httpUrlText = getString(R.string.web_url_label, getLocalIpAddress() ?: "0.0.0.0", currentPortText.toIntOrNull() ?: 8080)
+        val streamStatusText = buildString {
+            append(getString(R.string.streams_prefix))
+            val sortedIndices = service.sessionsByIndex.keys().toList().sorted()
+            if (sortedIndices.isEmpty()) {
+                append(getString(R.string.none))
+            } else {
+                sortedIndices.forEach { idx ->
+                    val session = service.sessionsByIndex[idx] ?: return@forEach
+                    val status = if (session.isStreaming) getString(R.string.streaming_status) else getString(R.string.idle_status)
+                    append("#$idx[$status] ")
+                }
+            }
+        }
+
+        val navItems = devices.map { device ->
+            val session = service.sessionsByFd.values.find { it.device.deviceName == device.deviceName }
+            CameraNavItem(
+                deviceName = device.deviceName,
+                title = session?.let { getString(R.string.camera_title_format, it.index) } ?: (device.productName ?: getString(R.string.camera_generic)),
+                subtitle = buildString {
+                    append(device.productName ?: device.deviceName.takeLast(8))
+                    append(" • ")
+                    append(
+                        when {
+                            session?.isStreaming == true -> getString(R.string.live_short)
+                            session != null -> getString(R.string.ready_short)
+                            else -> getString(R.string.discovered_short)
+                        }
+                    )
+                },
+                cameraIndex = session?.index,
+                isStreaming = session?.isStreaming == true,
+                hasPermission = (getSystemService(Context.USB_SERVICE) as UsbManager).hasPermission(device)
+            )
+        }.sortedWith(compareBy<CameraNavItem> { it.cameraIndex ?: Int.MAX_VALUE }.thenBy { it.title })
+
+        val selectedName = selectedDeviceName
+        var destination = currentDestination
+        var previewBitmap: Bitmap? = if (currentDestination == Destination.Home) null else uiState.previewBitmap
+
+        if (selectedName != null && devices.none { it.deviceName == selectedName }) {
+            selectedDeviceName = null
+            previewBitmap = null
+            destination = Destination.Home
+        }
+
+        val cameraDetail = when (destination) {
+            Destination.Home -> null
+            is Destination.Camera -> buildCameraDetail(service, destination.deviceName)
+        }
+
+        if (cameraDetail == null && destination is Destination.Camera) {
+            selectedDeviceName = null
+            previewBitmap = null
+            destination = Destination.Home
+        }
+
+        if (destination == Destination.Home) {
+            previewBitmap = null
+        }
+
+        uiState = uiState.copy(
+            currentDestination = destination,
+            cameraNavItems = navItems,
+            cameraDetail = cameraDetail,
+            previewBitmap = previewBitmap,
+            bandwidthText = bandwidthText,
+            avgFpsText = avgFpsText,
+            httpUrlText = httpUrlText,
+            streamStatusText = streamStatusText,
+            connectedCount = connectedCount,
+            streamingCount = streamingCount,
+            logLines = logLines.toList()
+        )
+    }
+
+    private fun buildCameraDetail(service: UvcStreamingService, deviceName: String): CameraDetailUi? {
+        val session = service.sessionsByFd.values.find { it.device.deviceName == deviceName } ?: return null
+        if (!session.isStreaming && session.isPreviewEnabled) {
+            session.isPreviewEnabled = false
+        }
+        val resolutionMap = parseResolutionMap(session.supportedFormats)
+        val resolutions = resolutionMap.keys.toList()
+        val selectedResolutionIndex = session.selectedResPos.coerceIn(0, (resolutions.size - 1).coerceAtLeast(0))
+        val fpsOptions = if (resolutions.isNotEmpty()) resolutionMap[resolutions[selectedResolutionIndex]].orEmpty() else emptyList()
+        val selectedFpsIndex = session.selectedFpsPos.coerceIn(0, (fpsOptions.size - 1).coerceAtLeast(0))
+        val port = uiState.currentPortText.toIntOrNull() ?: 8080
+        val host = getLocalIpAddress() ?: "0.0.0.0"
+        val streamUrl = "http://$host:$port/camera/${session.index}"
+        return CameraDetailUi(
+            deviceName = deviceName,
+            title = getString(R.string.camera_title_format, session.index),
+            subtitle = session.device.productName ?: session.device.deviceName,
+            cameraIndex = session.index,
+            status = if (session.isStreaming) getString(R.string.streaming) else getString(R.string.idle),
+            isStreaming = session.isStreaming,
+            isPreviewEnabled = session.isPreviewEnabled,
+            resolutionOptions = resolutions,
+            selectedResolutionIndex = selectedResolutionIndex,
+            fpsOptions = fpsOptions,
+            selectedFpsIndex = selectedFpsIndex,
+            technicalFacts = listOf(
+                getString(R.string.http_stream_url) to streamUrl,
+                getString(R.string.usb_path) to session.device.deviceName,
+                getString(R.string.vendor_product) to "0x${session.device.vendorId.toString(16)} / 0x${session.device.productId.toString(16)}",
+                getString(R.string.fd_label) to session.fd.toString(),
+                getString(R.string.preview_buffer) to "${session.buffer.capacity() / (1024 * 1024)} MB"
+            )
+        )
+    }
+
+    private fun parseResolutionMap(formatString: String): LinkedHashMap<String, List<String>> {
+        val resolutionMap = linkedMapOf<String, List<String>>()
+        formatString.split(";").forEach { part ->
+            if (part.contains(":")) {
+                val segments = part.split(":")
+                if (segments.size == 2) {
+                    resolutionMap[segments[0]] = segments[1].split(",").filter { it.isNotBlank() }
+                }
+            }
+        }
+        return resolutionMap
     }
 
     private fun refreshDeviceList() {
         if (uvcService == null) return
         val devices = getUvcDevices()
-        val deviceNames = devices.map { device ->
-            val session = uvcService?.sessionsByFd?.values?.find { it.device.deviceName == device.deviceName }
-            val shortPath = device.deviceName.takeLast(7)
-            if (session != null) {
-                getString(R.string.usb_status_cam_index, session.index, (device.productName ?: "Camera")) + " [$shortPath]"
-            } else {
-                (device.productName ?: "Camera") + " [$shortPath]"
-            }
-        }
-        val adapter = ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, if(deviceNames.isEmpty()) listOf(getString(R.string.no_uvc_device)) else deviceNames)
-        binding.actvDevices.setAdapter(adapter)
-        
         if (devices.isEmpty()) {
-            currentDevice = null
-            binding.tilResolution.visibility = View.GONE
-            binding.tilFps.visibility = View.GONE
-            binding.swPreview.visibility = View.GONE
-            binding.btnStreamToggle.visibility = View.GONE
-            binding.tvCameraId.visibility = View.GONE
-            binding.tvUsbStatus.text = getString(R.string.usb_status_not_found)
-            binding.ivPreview.setImageResource(0)
-            binding.tvPreviewLabel.text = getString(R.string.preview_label)
-            binding.btnStreamToggle.isEnabled = false
-            binding.btnStreamToggle.text = getString(R.string.start_streaming)
-            binding.tvPreviewOffHint.visibility = View.GONE
-            binding.actvDevices.setText(getString(R.string.no_uvc_device), false)
-        } else {
-            processConnectedDevices(devices)
-            
-            // Auto-selection if empty or selection vanished
-            val current = currentDevice
-            if (current == null || devices.none { it.deviceName == current.deviceName }) {
-                openDevice(devices[0])
-            } else {
-                // Update text to show any session ID changes
-                updateDropdownText(current)
-            }
+            resetSelectionToHome()
+            updateUiSnapshot()
+            return
         }
+        processConnectedDevices(devices)
+        if (selectedDeviceName != null && devices.none { it.deviceName == selectedDeviceName }) {
+            resetSelectionToHome()
+        }
+        updateUiSnapshot()
     }
 
     private fun processConnectedDevices(devices: List<UsbDevice>) {
         val manager = getSystemService(Context.USB_SERVICE) as UsbManager
         devices.forEach { device ->
-            val hasPerm = manager.hasPermission(device)
-            Log.d("MainActivity", "Checking device: ${device.deviceName}, hasPermission: $hasPerm")
-            if (hasPerm) {
+            if (manager.hasPermission(device)) {
                 if (uvcService?.sessionsByFd?.values?.none { it.device.deviceName == device.deviceName } == true) {
                     logToUI("Opening device: ${device.deviceName}")
-                    val conn = manager.openDevice(device)
-                    if (conn != null) {
-                        uvcService?.initCamera(device, conn)
-                    } else {
-                        logToUI("FAIL: Failed to open connection for ${device.deviceName}")
-                    }
+                    manager.openDevice(device)?.let { uvcService?.initCamera(device, it) }
+                        ?: logToUI("FAIL: Failed to open connection for ${device.deviceName}")
                 }
             } else {
                 requestPermission(device)
             }
         }
+        updateUiSnapshot()
     }
 
     private fun openDevice(device: UsbDevice) {
-        currentDevice = device
-        logToUI("User selected device: ${device.deviceName}")
-        updateDropdownText(device)
+        selectedDeviceName = device.deviceName
+        uiState = uiState.copy(currentDestination = Destination.Camera(device.deviceName), previewBitmap = null)
+        logToUI("Selected device: ${device.deviceName}")
         val session = uvcService?.sessionsByFd?.values?.find { it.device.deviceName == device.deviceName }
         if (session != null) {
-            logToUI("Restoring UI for existing session Cam ${session.index}")
-            restoreCameraUI(session)
-        } else {
-            val manager = getSystemService(Context.USB_SERVICE) as UsbManager
-            if (manager.hasPermission(device)) {
-                 logToUI("Opening device (no session): ${device.deviceName}")
-                 val conn = manager.openDevice(device)
-                 if (conn != null) {
-                     uvcService?.initCamera(device, conn)
-                 }
-            } else {
-                 logToUI("Requesting permission for user-selected device: ${device.deviceName}")
-                 requestPermission(device)
-            }
-        }
-    }
-
-    private fun updateDropdownText(device: UsbDevice) {
-        val session = uvcService?.sessionsByFd?.values?.find { it.device.deviceName == device.deviceName }
-        val shortPath = device.deviceName.takeLast(7)
-        val displayName = if (session != null) {
-            getString(R.string.usb_status_cam_index, session.index, (device.productName ?: "Camera")) + " [$shortPath]"
-        } else {
-            (device.productName ?: "Camera") + " [$shortPath]"
-        }
-        binding.actvDevices.setText(displayName, false)
-    }
-
-    private fun restoreCameraUI(session: UvcStreamingService.CameraSession) {
-        binding.ivPreview.setImageResource(0)
-        updateDropdownText(session.device)
-        binding.tvCameraId.visibility = View.VISIBLE
-        binding.tvCameraId.text = "ID: ${session.index}"
-        binding.tvUsbStatus.text = getString(R.string.usb_status_cam_index, session.index, session.device.productName ?: "")
-        
-        binding.tilResolution.visibility = View.VISIBLE
-        binding.tilFps.visibility = View.VISIBLE
-        binding.swPreview.visibility = View.VISIBLE
-        binding.btnStreamToggle.visibility = View.VISIBLE
-        
-        val resolutionMap = mutableMapOf<String, List<String>>()
-        session.supportedFormats.split(";").forEach { part ->
-            if (part.contains(":")) {
-                val resFps = part.split(":")
-                resolutionMap[resFps[0]] = resFps[1].split(",").filter { it.isNotEmpty() }
-            }
-        }
-        val resList = resolutionMap.keys.toList()
-        if (resList.isEmpty()) {
-            logToUI(getString(R.string.no_uvc_device))
+            updateUiSnapshot()
             return
         }
-        
-        val resAdapter = ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, resList)
-        binding.actvResolution.setAdapter(resAdapter)
-        val safeResPos = session.selectedResPos.coerceIn(0, Math.max(0, resList.size - 1))
-        if (resList.isNotEmpty()) binding.actvResolution.setText(resList[safeResPos], false)
-        
-        fun updateFpsAdapter(resPos: Int) {
-            val fpsList = resolutionMap[resList[resPos]] ?: emptyList()
-            val fpsAdapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_dropdown_item_1line, fpsList)
-            binding.actvFps.setAdapter(fpsAdapter)
-            val safeFpsPos = session.selectedFpsPos.coerceIn(0, Math.max(0, fpsList.size - 1))
-            if (fpsList.isNotEmpty()) binding.actvFps.setText(fpsList[safeFpsPos], false)
+        val manager = getSystemService(Context.USB_SERVICE) as UsbManager
+        if (manager.hasPermission(device)) {
+            manager.openDevice(device)?.let { uvcService?.initCamera(device, it) }
+        } else {
+            requestPermission(device)
         }
+        updateUiSnapshot()
+    }
 
-        if (resList.isNotEmpty()) updateFpsAdapter(safeResPos)
+    private fun selectHome() {
+        resetSelectionToHome()
+        updateUiSnapshot()
+    }
 
-        binding.actvResolution.setOnItemClickListener { _, _, pos, _ ->
-            session.selectedResPos = pos
-            updateFpsAdapter(pos)
+    private fun selectCamera(deviceName: String) {
+        getUvcDevices().find { it.deviceName == deviceName }?.let { openDevice(it) }
+    }
+
+    private fun setPreviewEnabled(enabled: Boolean) {
+        val deviceName = selectedDeviceName ?: return
+        val session = uvcService?.sessionsByFd?.values?.find { it.device.deviceName == deviceName } ?: return
+        if (enabled && !session.isStreaming) {
+            showToast(getString(R.string.preview_requires_streaming))
+            return
         }
-
-        binding.actvFps.setOnItemClickListener { _, _, pos, _ ->
-            session.selectedFpsPos = pos
+        session.isPreviewEnabled = enabled
+        if (!enabled) {
+            uiState = uiState.copy(previewBitmap = null)
         }
-        
-        updateToggleButtonUI(session)
-        binding.swPreview.isChecked = session.isPreviewEnabled
-        updatePreviewVisibility(session)
+        updateUiSnapshot()
+    }
+
+    private fun updateResolutionSelection(index: Int) {
+        val deviceName = selectedDeviceName ?: return
+        val session = uvcService?.sessionsByFd?.values?.find { it.device.deviceName == deviceName } ?: return
+        if (session.isStreaming) {
+            showToast(getString(R.string.stop_stream_before_changing_settings))
+            return
+        }
+        session.selectedResPos = index
+        session.selectedFpsPos = 0
+        updateUiSnapshot()
+    }
+
+    private fun updateFpsSelection(index: Int) {
+        val deviceName = selectedDeviceName ?: return
+        val session = uvcService?.sessionsByFd?.values?.find { it.device.deviceName == deviceName } ?: return
+        if (session.isStreaming) {
+            showToast(getString(R.string.stop_stream_before_changing_settings))
+            return
+        }
+        session.selectedFpsPos = index
+        updateUiSnapshot()
     }
 
     private fun toggleStreaming() {
-        val service = uvcService
-        if (service == null) {
+        val service = uvcService ?: run {
             logToUI(getString(R.string.service_not_ready))
             return
         }
-        val dev = currentDevice
-        if (dev == null) {
+        val deviceName = selectedDeviceName ?: run {
             logToUI(getString(R.string.no_device_selected))
             return
         }
-        val session = service.sessionsByFd.values.find { it.device.deviceName == dev.deviceName }
-        if (session == null) {
+        val session = service.sessionsByFd.values.find { it.device.deviceName == deviceName } ?: run {
             logToUI(getString(R.string.camera_initializing_wait))
             return
         }
-        
-        binding.btnStreamToggle.isEnabled = false
+
+        val resolutionMap = parseResolutionMap(session.supportedFormats)
+        val resolutions = resolutionMap.keys.toList()
+        val selectedResolution = resolutions.getOrNull(session.selectedResPos)
+        val fpsOptions = selectedResolution?.let { resolutionMap[it].orEmpty() }.orEmpty()
+        val selectedFps = fpsOptions.getOrNull(session.selectedFpsPos)
+
         if (session.isStreaming) {
+            session.isPreviewEnabled = false
             service.stopStreaming(session.fd) {
                 runOnUiThread {
-                    binding.btnStreamToggle.isEnabled = true
-                    updateToggleButtonUI(session)
-                    binding.ivPreview.setImageResource(0)
+                    uiState = uiState.copy(previewBitmap = null)
+                    updateUiSnapshot()
                 }
             }
-        } else {
-            val res = binding.actvResolution.text?.toString()
-            val fpsStr = binding.actvFps.text?.toString()
-            
-            if (res.isNullOrEmpty() || fpsStr.isNullOrEmpty()) {
-                logToUI(getString(R.string.error_selection_incomplete))
-                binding.btnStreamToggle.isEnabled = true
-                return
-            }
-            
-            val fps = fpsStr.toIntOrNull() ?: 30
-            val wh = res.split("x")
-            val width = wh.getOrNull(0)?.toIntOrNull() ?: 640
-            val height = wh.getOrNull(1)?.toIntOrNull() ?: 480
-            
-            service.startStreaming(session.fd, width, height, fps) {
-                runOnUiThread {
-                    binding.btnStreamToggle.isEnabled = true
-                    updateToggleButtonUI(session)
-                }
-            }
+            return
+        }
+
+        if (selectedResolution.isNullOrBlank() || selectedFps.isNullOrBlank()) {
+            logToUI(getString(R.string.error_selection_incomplete))
+            return
+        }
+
+        val wh = selectedResolution.split("x")
+        val width = wh.getOrNull(0)?.toIntOrNull() ?: 640
+        val height = wh.getOrNull(1)?.toIntOrNull() ?: 480
+        val fps = selectedFps.toIntOrNull() ?: 30
+        service.startStreaming(session.fd, width, height, fps) {
+            runOnUiThread { updateUiSnapshot() }
         }
     }
 
-    private fun updateToggleButtonUI(session: UvcStreamingService.CameraSession) {
-        val isStreaming = session.isStreaming
-        binding.btnStreamToggle.isEnabled = true
-        binding.btnStreamToggle.text = if (isStreaming) getString(R.string.stop_streaming) else getString(R.string.start_streaming)
-        
-        // Correct way to change MaterialButton color without breaking style
-        val color = if (isStreaming) Color.parseColor("#B00020") else ContextCompat.getColor(this, R.color.primary_theme_color)
-        binding.btnStreamToggle.backgroundTintList = ColorStateList.valueOf(color)
-        
-        binding.tilResolution.isEnabled = !isStreaming
-        binding.tilFps.isEnabled = !isStreaming
-        binding.tvPreviewLabel.text = if (isStreaming) getString(R.string.preview_label_with_id, session.index) else getString(R.string.preview_label_id_only, session.index)
+    private fun applyHttpPort() {
+        val port = uiState.currentPortText.toIntOrNull() ?: 8080
+        if (port !in 1..65535) {
+            showToast(getString(R.string.invalid_port))
+            return
+        }
+        getSharedPreferences("uvc_prefs", Context.MODE_PRIVATE).edit().putInt("http_port", port).apply()
+        uvcService?.updateHttpPort(port)
+        updateUiSnapshot()
     }
 
     private fun requestPermission(device: UsbDevice) {
         val now = System.currentTimeMillis()
         val lastDenied = permissionCooldowns[device.deviceName] ?: 0L
-        if (now - lastDenied < COOLDOWN_MS) {
-            logToUI("Skip: Device ${device.deviceName} in cooldown after denial.")
-            return
-        }
-
-        if (requestingPermissions.contains(device.deviceName)) {
-            logToUI("Skip: Permission already requested for ${device.deviceName}")
-            return
-        }
-
-        logToUI("Action: Requesting permission for ${device.deviceName}")
-        logToUI("Quest 3 Hint: Check System Settings > Privacy > Connected Cameras.")
+        if (now - lastDenied < cooldownMs || requestingPermissions.contains(device.deviceName)) return
         requestingPermissions.add(device.deviceName)
+        logToUI("Requesting permission for ${device.deviceName}")
         val manager = getSystemService(Context.USB_SERVICE) as UsbManager
-        val intent = Intent(ACTION_USB_PERMISSION).setPackage(packageName)
+        val intent = Intent(actionUsbPermission).setPackage(packageName)
         val flags = if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
         val permissionIntent = PendingIntent.getBroadcast(this, device.deviceId, intent, flags)
         manager.requestPermission(device, permissionIntent)
@@ -478,11 +539,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        val action = intent?.action
-        logToUI("Handling Activity Intent: $action")
-        if (UsbManager.ACTION_USB_DEVICE_ATTACHED == action) {
-            refreshDeviceList()
-        }
+        if (intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) refreshDeviceList()
     }
 
     private val usbDynamicReceiver = object : BroadcastReceiver() {
@@ -493,15 +550,12 @@ class MainActivity : AppCompatActivity() {
                 @Suppress("DEPRECATION")
                 intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
             }
-            if (intent.action == ACTION_USB_PERMISSION) {
+            if (intent.action == actionUsbPermission) {
                 val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
                 logToUI("Permission Result: ${device?.deviceName} granted=$granted")
-                
-                device?.let { 
+                device?.let {
                     requestingPermissions.remove(it.deviceName)
-                    if (!granted) {
-                        permissionCooldowns[it.deviceName] = System.currentTimeMillis()
-                    }
+                    if (!granted) permissionCooldowns[it.deviceName] = System.currentTimeMillis()
                 }
                 if (granted) refreshDeviceList()
             }
@@ -516,29 +570,36 @@ class MainActivity : AppCompatActivity() {
                 @Suppress("DEPRECATION")
                 intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
             }
-            when(intent.action) {
+            when (intent.action) {
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    logToUI("USB Detached: ${device?.deviceName}")
-                    device?.let { dev ->
-                        uvcService?.sessionsByFd?.values?.find { it.device.deviceName == dev.deviceName }?.let { 
+                    device?.let { detached ->
+                        requestingPermissions.remove(detached.deviceName)
+                        permissionCooldowns.remove(detached.deviceName)
+                        uvcService?.sessionsByFd?.values?.find { it.device.deviceName == detached.deviceName }?.let {
                             uvcService?.releaseCamera(it.fd)
                         }
-                        if (currentDevice?.deviceName == dev.deviceName) {
-                            currentDevice = null
+                        if (selectedDeviceName == detached.deviceName) {
+                            resetSelectionToHome()
                         }
-                        refreshDeviceList()
                     }
-                }
-                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    logToUI("USB Attached: ${device?.deviceName}")
                     refreshDeviceList()
                 }
-                "net.d7z.net.oss.uvc.EXIT" -> {
-                    logToUI("Exit signal received")
-                    finish()
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    uiState = uiState.copy(previewBitmap = null)
+                    refreshDeviceList()
                 }
+                "net.d7z.net.oss.uvc.EXIT" -> finish()
             }
         }
+    }
+
+    private fun resetSelectionToHome() {
+        selectedDeviceName = null
+        uiState = uiState.copy(
+            currentDestination = Destination.Home,
+            cameraDetail = null,
+            previewBitmap = null
+        )
     }
 
     private fun registerReceivers() {
@@ -549,46 +610,38 @@ class MainActivity : AppCompatActivity() {
         }
         if (Build.VERSION.SDK_INT >= 34) {
             registerReceiver(usbSystemReceiver, systemFilter, RECEIVER_EXPORTED)
+            registerReceiver(usbDynamicReceiver, IntentFilter(actionUsbPermission), RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(usbSystemReceiver, systemFilter)
-        }
-
-        val dynamicFilter = IntentFilter(ACTION_USB_PERMISSION)
-        if (Build.VERSION.SDK_INT >= 34) {
-            registerReceiver(usbDynamicReceiver, dynamicFilter, RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(usbDynamicReceiver, dynamicFilter)
+            registerReceiver(usbDynamicReceiver, IntentFilter(actionUsbPermission))
         }
     }
 
     private fun getUvcDevices(): List<UsbDevice> {
         val manager = getSystemService(Context.USB_SERVICE) as UsbManager
-        return manager.deviceList.values.filter { 
+        return manager.deviceList.values.filter {
             it.deviceClass == 239 || (0 until it.interfaceCount).any { i -> it.getInterface(i).interfaceClass == 14 }
         }
     }
 
-    private fun getLocalIpAddress(): String? {
-        try {
-            val interfaces = NetworkInterface.getNetworkInterfaces()
-            for (networkInterface in Collections.list(interfaces)) {
-                val addresses = networkInterface.inetAddresses
-                for (address in Collections.list(addresses)) {
-                    if (!address.isLoopbackAddress && address is Inet4Address) {
-                        return address.hostAddress
-                    }
+    private fun getLocalIpAddress(): String? = try {
+        val interfaces = NetworkInterface.getNetworkInterfaces()
+        Collections.list(interfaces).forEach { networkInterface ->
+            Collections.list(networkInterface.inetAddresses).forEach { address ->
+                if (!address.isLoopbackAddress && address is Inet4Address) {
+                    return address.hostAddress
                 }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
-        return null
+        null
+    } catch (_: Exception) {
+        null
     }
 
     override fun onDestroy() {
-        super.onDestroy()
         uvcService?.onFrameUpdateListener = null
         uvcService?.onSessionCreatedListener = null
+        uvcService?.onSessionsChangedListener = null
         uvcService?.onLogMessage = null
         if (isBound) {
             uvcService?.stopIfIdle()
@@ -599,6 +652,8 @@ class MainActivity : AppCompatActivity() {
         try {
             unregisterReceiver(usbSystemReceiver)
             unregisterReceiver(usbDynamicReceiver)
-        } catch (e: Exception) {}
+        } catch (_: Exception) {
+        }
+        super.onDestroy()
     }
 }

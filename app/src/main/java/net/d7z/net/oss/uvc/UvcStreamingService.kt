@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import fi.iki.elonen.NanoHTTPD
 import java.io.InputStream
@@ -22,6 +23,15 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 class UvcStreamingService : Service() {
+    private val logTag = "UVC_SERVICE"
+
+    enum class SessionState {
+        IDLE,
+        STARTING,
+        STREAMING,
+        STOPPING,
+        RELEASING
+    }
 
     // --- 数据结构 ---
     inner class CameraSession(
@@ -30,26 +40,33 @@ class UvcStreamingService : Service() {
         val device: UsbDevice,
         val connection: UsbDeviceConnection
     ) {
-        val buffer: ByteBuffer = ByteBuffer.allocateDirect(4 * 1024 * 1024)
-        val frameLock = Object()
+        val buffer: ByteBuffer = ByteBuffer.allocateDirect(FRAME_BUFFER_SIZE_BYTES)
+        @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+        val frameLock = java.lang.Object()
         val frameSize = AtomicInteger(0)
         val frameCount = AtomicLong(0)
         val isDecoding = AtomicBoolean(false)
-        var isStreaming = false
+        val stateLock = Any()
+        @Volatile var state: SessionState = SessionState.IDLE
         var supportedFormats: String = ""
         var selectedResPos: Int = 0
         var selectedFpsPos: Int = 0
         var isPreviewEnabled: Boolean = false
+        var previewBuffer: ByteArray = ByteArray(0)
+
+        val isStreaming: Boolean
+            get() = state == SessionState.STREAMING
     }
 
     // --- 成员变量 ---
     val sessionsByIndex = ConcurrentHashMap<Int, CameraSession>()
     val sessionsByFd = ConcurrentHashMap<Int, CameraSession>()
-    private var nextCamIndex = AtomicInteger(0)
     private var server: MjpegServer? = null
     val totalSentBytes = AtomicLong(0)
     private val initializingDevices = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private var isForeground = false
+    private val indexLock = Any()
+    private val reservedIndices = mutableSetOf<Int>()
 
     private val serviceHandler = Handler(Looper.getMainLooper())
     private var lastSentBytes: Long = 0
@@ -68,10 +85,51 @@ class UvcStreamingService : Service() {
     // 回调给 Activity 用于预览
     var onFrameUpdateListener: ((fd: Int, size: Int) -> Unit)? = null
     var onSessionCreatedListener: ((CameraSession) -> Unit)? = null
+    var onSessionsChangedListener: (() -> Unit)? = null
     var onLogMessage: ((String) -> Unit)? = null
 
     private fun log(msg: String) {
+        Log.i(logTag, msg)
         onLogMessage?.invoke(msg)
+    }
+
+    private fun allocateCameraIndex(): Int {
+        synchronized(indexLock) {
+            var candidate = 0
+            while (candidate in reservedIndices || sessionsByIndex.containsKey(candidate)) {
+                candidate++
+            }
+            reservedIndices.add(candidate)
+            return candidate
+        }
+    }
+
+    private fun releaseCameraIndex(index: Int) {
+        synchronized(indexLock) {
+            reservedIndices.remove(index)
+        }
+    }
+
+    private fun describeUsbDevice(device: UsbDevice): String {
+        val interfaceSummary = buildString {
+            append("[")
+            for (i in 0 until device.interfaceCount) {
+                val intf = device.getInterface(i)
+                if (i > 0) append("; ")
+                append(
+                    "if#${intf.id}" +
+                        "/cls=${intf.interfaceClass}" +
+                        "/sub=${intf.interfaceSubclass}" +
+                        "/proto=${intf.interfaceProtocol}" +
+                        "/ep=${intf.endpointCount}"
+                )
+            }
+            append("]")
+        }
+        return "name=${device.deviceName}, product=${device.productName}, manufacturer=${device.manufacturerName}, " +
+            "vid=0x${device.vendorId.toString(16)}, pid=0x${device.productId.toString(16)}, " +
+            "class=${device.deviceClass}, subclass=${device.deviceSubclass}, proto=${device.deviceProtocol}, " +
+            "interfaces=$interfaceSummary"
     }
 
     // --- Service 生命周期 ---
@@ -85,6 +143,7 @@ class UvcStreamingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        attachServiceCallback()
         val prefs = getSharedPreferences("uvc_prefs", Context.MODE_PRIVATE)
         val port = prefs.getInt("http_port", 8080)
         startHttpServer(port)
@@ -92,6 +151,14 @@ class UvcStreamingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return START_STICKY
+    }
+
+    override fun onDestroy() {
+        sessionsByFd.keys.toList().forEach { releaseCamera(it) }
+        server?.stop()
+        detachServiceCallback()
+        serviceHandler.removeCallbacks(notificationUpdater)
+        super.onDestroy()
     }
 
     private fun startHttpServer(port: Int) {
@@ -151,6 +218,14 @@ class UvcStreamingService : Service() {
         private set
     var currentAvgFps: Double = 0.0
         private set
+
+    private fun updateStatsAndNotificationAsync() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            updateStatsAndNotification()
+        } else {
+            serviceHandler.post { updateStatsAndNotification() }
+        }
+    }
 
     private fun updateStatsAndNotification() {
         val streamingSessions = sessionsByFd.values.filter { it.isStreaming }
@@ -250,23 +325,27 @@ class UvcStreamingService : Service() {
             connection.close()
             return
         }
+        log("USB device opening: ${describeUsbDevice(device)}")
         Thread {
             try {
                 val fd = connection.fileDescriptor
+                log("USB connection opened: device=${device.deviceName}, fd=$fd, rawDescriptors=${connection.rawDescriptors?.size ?: 0}")
                 val formatStr = getDeviceSupportedFormats(fd)
                 if (formatStr.isNullOrEmpty()) {
                     connection.close()
                     log("FAIL: Could not load formats for ${device.productName}.")
                     return@Thread
                 }
-                val index = nextCamIndex.getAndIncrement()
+                val index = allocateCameraIndex()
                 val session = CameraSession(index, fd, device, connection)
                 session.supportedFormats = formatStr
                 sessionsByFd[fd] = session
                 sessionsByIndex[index] = session
-                updateStatsAndNotification()
-                log("Cam $index ready: ${device.productName}. URL: /camera/$index")
+                updateStatsAndNotificationAsync()
+                log("Cam $index assigned and ready: ${device.productName}. URL: /camera/$index")
+                log("Cam $index formats: $formatStr")
                 onSessionCreatedListener?.invoke(session)
+                onSessionsChangedListener?.invoke()
             } finally {
                 initializingDevices.remove(device.deviceName)
             }
@@ -276,10 +355,36 @@ class UvcStreamingService : Service() {
     fun startStreaming(fd: Int, width: Int, height: Int, fps: Int, onComplete: (() -> Unit)? = null) {
         Thread {
             val session = sessionsByFd[fd] ?: return@Thread
-            session.isStreaming = true
-            updateStatsAndNotification()
-            startUVC(fd, session.buffer, width, height, fps)
-            log("Cam ${session.index} Streaming Started.")
+            val shouldStart = synchronized(session.stateLock) {
+                if (session.state != SessionState.IDLE) {
+                    false
+                } else {
+                    session.state = SessionState.STARTING
+                    true
+                }
+            }
+
+            if (!shouldStart) {
+                onComplete?.invoke()
+                return@Thread
+            }
+
+            log("Cam ${session.index} start requested: ${width}x$height@$fps, bufferCap=${session.buffer.capacity()}")
+            val started = startUVC(fd, session.buffer, width, height, fps)
+
+            synchronized(session.stateLock) {
+                if (session.state == SessionState.STARTING) {
+                    session.state = if (started) SessionState.STREAMING else SessionState.IDLE
+                }
+            }
+
+            updateStatsAndNotificationAsync()
+            if (started) {
+                log("Cam ${session.index} Streaming Started.")
+            } else {
+                log("FAIL: Cam ${session.index} failed to start streaming.")
+            }
+            onSessionsChangedListener?.invoke()
             onComplete?.invoke()
         }.start()
     }
@@ -287,26 +392,65 @@ class UvcStreamingService : Service() {
     fun stopStreaming(fd: Int, onComplete: (() -> Unit)? = null) {
         Thread {
             val session = sessionsByFd[fd] ?: return@Thread
+            val shouldStop = synchronized(session.stateLock) {
+                when (session.state) {
+                    SessionState.STREAMING, SessionState.STARTING -> {
+                        session.state = SessionState.STOPPING
+                        true
+                    }
+                    else -> false
+                }
+            }
+
+            if (!shouldStop) {
+                onComplete?.invoke()
+                return@Thread
+            }
+
             stopUVC(fd)
-            session.isStreaming = false
-            updateStatsAndNotification()
-            log("Cam ${session.index} Stopped.")
+            synchronized(session.stateLock) {
+                if (session.state == SessionState.STOPPING) {
+                    session.state = SessionState.IDLE
+                }
+            }
+            updateStatsAndNotificationAsync()
+            log("Cam ${session.index} stopped.")
+            onSessionsChangedListener?.invoke()
             onComplete?.invoke()
         }.start()
     }
 
     fun releaseCamera(fd: Int) {
-        val session = sessionsByFd.remove(fd) ?: return
+        val session = sessionsByFd[fd] ?: return
+        val shouldRelease = synchronized(session.stateLock) {
+            if (session.state == SessionState.RELEASING) {
+                false
+            } else {
+                session.state = SessionState.RELEASING
+                true
+            }
+        }
+        if (!shouldRelease) return
+
+        log("Cam ${session.index} releasing: state=${session.state}, fd=$fd, device=${session.device.deviceName}")
         releaseUVC(fd)
+        sessionsByFd.remove(fd)
         sessionsByIndex.remove(session.index)
+        releaseCameraIndex(session.index)
+        lastServiceFrameCounts.remove(fd)
         session.connection.close()
-        updateStatsAndNotification()
+        updateStatsAndNotificationAsync()
         log("Detached Cam ${session.index}")
+        onSessionsChangedListener?.invoke()
     }
 
     // Native 回调
     fun onFrameReady(fd: Int, size: Int) {
         val session = sessionsByFd[fd] ?: return
+        if (size <= 0 || size > session.buffer.capacity()) {
+            log("Drop frame for Cam ${session.index}: invalid size=$size cap=${session.buffer.capacity()}")
+            return
+        }
         session.frameCount.incrementAndGet()
         synchronized(session.frameLock) {
             session.frameSize.set(size)
@@ -470,9 +614,17 @@ class UvcStreamingService : Service() {
 
     external fun lockBuffer(fd: Int)
     external fun unlockBuffer(fd: Int)
+    external fun attachServiceCallback()
+    external fun detachServiceCallback()
     external fun getDeviceSupportedFormats(fd: Int): String
-    external fun startUVC(fd: Int, buffer: ByteBuffer, width: Int, height: Int, fps: Int)
+    external fun startUVC(fd: Int, buffer: ByteBuffer, width: Int, height: Int, fps: Int): Boolean
     external fun stopUVC(fd: Int)
     external fun releaseUVC(fd: Int)
-    companion object { init { System.loadLibrary("native-lib") } }
+    companion object {
+        const val FRAME_BUFFER_SIZE_BYTES = 16 * 1024 * 1024
+
+        init {
+            System.loadLibrary("native-lib")
+        }
+    }
 }

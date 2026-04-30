@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <memory>
+#include <chrono>
 
 extern "C" {
     #include <libusb.h>
@@ -26,6 +27,7 @@ static libusb_context *g_usb_ctx = nullptr;
 static std::thread g_event_thread;
 static std::atomic<bool> g_event_thread_run{false};
 static std::mutex g_usb_init_mutex;
+static std::mutex g_callback_mutex;
 
 void global_usb_event_thread() {
     LOGI("Global USB event thread started");
@@ -52,6 +54,28 @@ void ensure_usb_ctx() {
     }
 }
 
+void clear_java_callback(JNIEnv *env);
+
+void shutdown_usb_ctx_if_idle() {
+    {
+        std::lock_guard<std::mutex> lock(g_usb_init_mutex);
+        if (!g_usb_ctx) {
+            return;
+        }
+    }
+
+    g_event_thread_run = false;
+    if (g_event_thread.joinable()) {
+        g_event_thread.join();
+    }
+
+    std::lock_guard<std::mutex> lock(g_usb_init_mutex);
+    if (g_usb_ctx) {
+        libusb_exit(g_usb_ctx);
+        g_usb_ctx = nullptr;
+    }
+}
+
 struct CameraContext {
     int fd;
     uvc_context_t *uvc_ctx = nullptr;
@@ -60,6 +84,7 @@ struct CameraContext {
     
     jobject java_buffer = nullptr;
     uint8_t *buffer_ptr = nullptr;
+    jlong buffer_capacity = 0;
     std::atomic<uint64_t> frame_count{0};
     std::recursive_mutex buffer_mutex;
     std::mutex uvc_mutex; // Protects libuvc streaming operations
@@ -94,6 +119,8 @@ struct CameraContext {
             env->DeleteGlobalRef(java_buffer);
             java_buffer = nullptr;
         }
+        buffer_ptr = nullptr;
+        buffer_capacity = 0;
     }
 
     ~CameraContext() {
@@ -117,6 +144,28 @@ std::shared_ptr<CameraContext> get_camera_context(int fd) {
     return nullptr;
 }
 
+void refresh_java_callback(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    if (g_java_callback_obj) {
+        env->DeleteGlobalRef(g_java_callback_obj);
+        g_java_callback_obj = nullptr;
+    }
+    env->GetJavaVM(&g_jvm);
+    g_java_callback_obj = env->NewGlobalRef(thiz);
+    jclass service_class = env->GetObjectClass(thiz);
+    g_on_frame_mid = env->GetMethodID(service_class, "onFrameReady", "(II)V");
+    env->DeleteLocalRef(service_class);
+}
+
+void clear_java_callback(JNIEnv *env) {
+    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    if (g_java_callback_obj && env) {
+        env->DeleteGlobalRef(g_java_callback_obj);
+    }
+    g_java_callback_obj = nullptr;
+    g_on_frame_mid = nullptr;
+}
+
 void frame_callback(uvc_frame_t *frame, void *ptr) {
     CameraContext *ctx = (CameraContext*)ptr;
     ctx->frame_count++;
@@ -126,19 +175,33 @@ void frame_callback(uvc_frame_t *frame, void *ptr) {
     {
         std::lock_guard<std::recursive_mutex> lock(ctx->buffer_mutex);
         if (ctx->cleaned_up || !ctx->buffer_ptr) return;
+        if (frame->data_bytes == 0 || static_cast<jlong>(frame->data_bytes) > ctx->buffer_capacity) {
+            LOGE("Native[%d]: Dropping oversized or empty frame (%zu > %lld)",
+                 ctx->fd, frame->data_bytes, static_cast<long long>(ctx->buffer_capacity));
+            return;
+        }
         memcpy(ctx->buffer_ptr, frame->data, frame->data_bytes);
     }
 
-    JNIEnv *env;
+    JNIEnv *env = nullptr;
+    bool did_attach = false;
     if (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
         if (g_jvm->AttachCurrentThread(&env, NULL) != JNI_OK) return;
+        did_attach = true;
     }
-    
-    if (g_java_callback_obj && g_on_frame_mid) {
-        env->CallVoidMethod(g_java_callback_obj, g_on_frame_mid, (jint)ctx->fd, (jint)frame->data_bytes);
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
+
+    {
+        std::lock_guard<std::mutex> lock(g_callback_mutex);
+        if (g_java_callback_obj && g_on_frame_mid) {
+            env->CallVoidMethod(g_java_callback_obj, g_on_frame_mid, (jint)ctx->fd, (jint)frame->data_bytes);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
         }
+    }
+
+    if (did_attach) {
+        g_jvm->DetachCurrentThread();
     }
 }
 
@@ -169,15 +232,6 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
     if (!g_usb_ctx) {
         LOGE("libusb_context not available");
         return env->NewStringUTF("");
-    }
-
-    if (!g_java_callback_obj) {
-        std::lock_guard<std::mutex> lock(g_map_mutex);
-        if (!g_java_callback_obj) {
-            env->GetJavaVM(&g_jvm);
-            g_java_callback_obj = env->NewGlobalRef(thiz);
-            g_on_frame_mid = env->GetMethodID(env->GetObjectClass(thiz), "onFrameReady", "(II)V");
-        }
     }
 
     std::shared_ptr<CameraContext> old_ctx;
@@ -213,9 +267,17 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
     ctx->dev->usb_dev = libusb_get_device(usb_handle);
     ctx->dev->ref = 1;
 
+    libusb_device_descriptor desc{};
+    if (libusb_get_device_descriptor(ctx->dev->usb_dev, &desc) == 0) {
+        LOGI("Native[%d]: USB device descriptor vid=0x%04x pid=0x%04x class=%u subclass=%u proto=%u",
+             fd, desc.idVendor, desc.idProduct, desc.bDeviceClass, desc.bDeviceSubClass, desc.bDeviceProtocol);
+    } else {
+        LOGE("Native[%d]: Failed to read USB device descriptor", fd);
+    }
+
     if (uvc_open_internal(ctx->dev, usb_handle, &ctx->devh) != UVC_SUCCESS) {
         LOGE("uvc_open_internal failed for FD %d", fd);
-        libusb_close(usb_handle); ctx->cleanup(env); return env->NewStringUTF("");
+        ctx->cleanup(env); return env->NewStringUTF("");
     }
 
     {
@@ -228,15 +290,23 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
     while (format_desc) {
         char fourcc[5] = {0};
         memcpy(fourcc, format_desc->fourccFormat, 4);
+        LOGI("Native[%d]: format index=%u fourcc=%s bpp=%u",
+             fd, format_desc->bFormatIndex, fourcc, format_desc->bBitsPerPixel);
         if (strcmp(fourcc, "MJPG") == 0) {
             const uvc_frame_desc_t *frame_desc = format_desc->frame_descs;
             while (frame_desc) {
+                std::stringstream frame_log;
+                frame_log << "Native[" << fd << "]: MJPEG frame "
+                          << frame_desc->wWidth << "x" << frame_desc->wHeight << " fps=";
                 ss << frame_desc->wWidth << "x" << frame_desc->wHeight << ":";
                 if (frame_desc->intervals) {
                     for (uint32_t *interval = frame_desc->intervals; *interval; ++interval) {
-                        ss << (10000000 / *interval) << ( (*(interval+1)) ? "," : "" );
+                        const auto current_fps = (10000000 / *interval);
+                        ss << current_fps << ( (*(interval+1)) ? "," : "" );
+                        frame_log << current_fps << ( (*(interval+1)) ? "," : "" );
                     }
                 }
+                LOGI("%s", frame_log.str().c_str());
                 ss << ";";
                 frame_desc = frame_desc->next;
             }
@@ -247,19 +317,40 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_net_d7z_net_oss_uvc_UvcStreamingService_attachServiceCallback(JNIEnv *env, jobject thiz) {
+    refresh_java_callback(env, thiz);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_net_d7z_net_oss_uvc_UvcStreamingService_detachServiceCallback(JNIEnv *env, jobject thiz) {
+    clear_java_callback(env);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
 Java_net_d7z_net_oss_uvc_UvcStreamingService_startUVC(JNIEnv *env, jobject thiz, jint fd, jobject buffer, jint width, jint height, jint fps) {
     auto ctx = get_camera_context(fd);
-    if (!ctx) return;
+    if (!ctx || !buffer) return JNI_FALSE;
+
+    auto *buffer_ptr = (uint8_t*)env->GetDirectBufferAddress(buffer);
+    const jlong buffer_capacity = env->GetDirectBufferCapacity(buffer);
+    if (!buffer_ptr || buffer_capacity <= 0) {
+        LOGE("Native[%d]: Invalid direct buffer", fd);
+        return JNI_FALSE;
+    }
+
+    LOGI("Native[%d]: startUVC request width=%d height=%d fps=%d bufferCapacity=%lld",
+         fd, width, height, fps, static_cast<long long>(buffer_capacity));
 
     {
         std::lock_guard<std::recursive_mutex> lock(ctx->buffer_mutex);
         if (ctx->java_buffer) env->DeleteGlobalRef(ctx->java_buffer);
         ctx->java_buffer = env->NewGlobalRef(buffer);
-        ctx->buffer_ptr = (uint8_t*)env->GetDirectBufferAddress(buffer);
+        ctx->buffer_ptr = buffer_ptr;
+        ctx->buffer_capacity = buffer_capacity;
     }
 
     std::unique_lock<std::mutex> uvc_lock(ctx->uvc_mutex);
-    if (ctx->cleaned_up || !ctx->devh) return;
+    if (ctx->cleaned_up || !ctx->devh) return JNI_FALSE;
 
     uvc_stop_streaming(ctx->devh);
     
@@ -268,7 +359,7 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_startUVC(JNIEnv *env, jobject thiz,
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     uvc_lock.lock();
 
-    if (ctx->cleaned_up || !ctx->devh) return;
+    if (ctx->cleaned_up || !ctx->devh) return JNI_FALSE;
 
     uvc_stream_ctrl_t ctrl;
     uvc_error_t res = uvc_get_stream_ctrl_format_size(ctx->devh, &ctrl, UVC_FRAME_FORMAT_MJPEG, width, height, fps);
@@ -278,20 +369,22 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_startUVC(JNIEnv *env, jobject thiz,
         uvc_lock.unlock();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         uvc_lock.lock();
-        if (ctx->cleaned_up || !ctx->devh) return;
+        if (ctx->cleaned_up || !ctx->devh) return JNI_FALSE;
         res = uvc_get_stream_ctrl_format_size(ctx->devh, &ctrl, UVC_FRAME_FORMAT_MJPEG, width, height, fps);
     }
 
     if (res == UVC_SUCCESS) {
         res = uvc_start_streaming(ctx->devh, &ctrl, frame_callback, (void*)ctx.get(), 0);
         if (res == UVC_SUCCESS) {
-            LOGI("Native[%d]: Streaming started.", fd);
+            LOGI("Native[%d]: Streaming started at %dx%d@%d", fd, width, height, fps);
+            return JNI_TRUE;
         } else {
             LOGE("Native[%d]: Failed to start streaming: %s", fd, uvc_strerror(res));
         }
     } else {
         LOGE("Native[%d]: Final fail to get stream ctrl: %s", fd, uvc_strerror(res));
     }
+    return JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -300,6 +393,7 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_stopUVC(JNIEnv *env, jobject thiz, 
     if (ctx) {
         std::lock_guard<std::mutex> lock(ctx->uvc_mutex);
         if (ctx->cleaned_up || !ctx->devh) return;
+        LOGI("Native[%d]: stopUVC requested", fd);
         uvc_stop_streaming(ctx->devh);
     }
 }
@@ -316,11 +410,22 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_releaseUVC(JNIEnv *env, jobject thi
     }
     
     if (target_ctx) {
+        LOGI("Native[%d]: releaseUVC requested", fd);
         target_ctx->cleanup(env);
         std::lock_guard<std::recursive_mutex> buffer_lock(target_ctx->buffer_mutex);
         {
             std::lock_guard<std::mutex> lock(g_map_mutex);
             g_camera_map.erase(fd);
         }
+    }
+
+    bool no_cameras = false;
+    {
+        std::lock_guard<std::mutex> lock(g_map_mutex);
+        no_cameras = g_camera_map.empty();
+    }
+    if (no_cameras) {
+        clear_java_callback(env);
+        shutdown_usb_ctx_if_idle();
     }
 }
