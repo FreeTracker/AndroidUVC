@@ -27,6 +27,7 @@ import androidx.compose.runtime.setValue
 import net.d7z.net.oss.uvc.ui.model.CameraDetailUi
 import net.d7z.net.oss.uvc.ui.model.CameraNavItem
 import net.d7z.net.oss.uvc.ui.model.CameraUiStatus
+import net.d7z.net.oss.uvc.ui.model.BulkStreamAction
 import net.d7z.net.oss.uvc.ui.model.Destination
 import net.d7z.net.oss.uvc.ui.model.MainUiCallbacks
 import net.d7z.net.oss.uvc.ui.model.MainUiState
@@ -52,6 +53,7 @@ class MainActivity : AppCompatActivity() {
     private val permissionCooldowns = mutableMapOf<String, Long>()
     private val cooldownMs = 10_000L
     private val logLines = mutableListOf<String>()
+    private var bulkStreamAction: BulkStreamAction? = null
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -225,6 +227,7 @@ class MainActivity : AppCompatActivity() {
         val connectedCount = devices.size
         val currentPortText = uiState.currentPortText
         val currentDestination = uiState.currentDestination
+        val currentBulkAction = bulkStreamAction
 
         if (service == null) {
             uiState = uiState.copy(
@@ -238,6 +241,7 @@ class MainActivity : AppCompatActivity() {
                 streamStatusText = "STREAMS: NONE",
                 connectedCount = connectedCount,
                 streamingCount = 0,
+                bulkStreamAction = currentBulkAction,
                 logLines = logLines.toList()
             )
             return
@@ -326,6 +330,7 @@ class MainActivity : AppCompatActivity() {
             streamStatusText = streamStatusText,
             connectedCount = connectedCount,
             streamingCount = streamingCount,
+            bulkStreamAction = currentBulkAction,
             logLines = logLines.toList()
         )
     }
@@ -357,6 +362,8 @@ class MainActivity : AppCompatActivity() {
             cameraIndex = session.index,
             status = if (session.isStreaming) CameraUiStatus.Streaming else CameraUiStatus.Ready,
             isStreaming = session.isStreaming,
+            isTransitioning = session.state == UvcStreamingService.SessionState.STARTING || session.state == UvcStreamingService.SessionState.STOPPING,
+            isStopping = session.state == UvcStreamingService.SessionState.STOPPING,
             isPreviewEnabled = session.isPreviewEnabled,
             resolutionOptions = resolutions,
             selectedResolutionIndex = selectedResolutionIndex,
@@ -535,13 +542,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startAllStreaming() {
+        if (bulkStreamAction != null) return
+        bulkStreamAction = BulkStreamAction.Starting
+        updateUiSnapshot()
         refreshDeviceList()
         mainHandler.postDelayed({
             val service = uvcService ?: return@postDelayed
-            service.sessionsByFd.values
+            val targetSessions = service.sessionsByFd.values
                 .sortedBy { it.index }
                 .filter { !it.isStreaming }
-                .forEach { session ->
+                .mapNotNull { session ->
                     val resolutionMap = parseResolutionMap(session.supportedFormats)
                     val resolutions = resolutionMap.keys.toList()
                     val selectedResolutionIndex = session.selectedResPos.coerceIn(0, (resolutions.size - 1).coerceAtLeast(0))
@@ -549,39 +559,64 @@ class MainActivity : AppCompatActivity() {
                         session.selectedResPos = selectedResolutionIndex
                         session.selectedFpsPos = 0
                     }
-                    val selectedResolution = resolutions.getOrNull(selectedResolutionIndex) ?: return@forEach
+                    val selectedResolution = resolutions.getOrNull(selectedResolutionIndex) ?: return@mapNotNull null
                     val fpsOptions = resolutionMap[selectedResolution].orEmpty()
                     val selectedFpsIndex = session.selectedFpsPos.coerceIn(0, (fpsOptions.size - 1).coerceAtLeast(0))
                     if (session.selectedFpsPos != selectedFpsIndex) {
                         session.selectedFpsPos = selectedFpsIndex
                     }
-                    val selectedFps = fpsOptions.getOrNull(selectedFpsIndex)?.toIntOrNull() ?: return@forEach
+                    val selectedFps = fpsOptions.getOrNull(selectedFpsIndex)?.toIntOrNull() ?: return@mapNotNull null
                     val wh = selectedResolution.split("x")
-                    val width = wh.getOrNull(0)?.toIntOrNull() ?: return@forEach
-                    val height = wh.getOrNull(1)?.toIntOrNull() ?: return@forEach
-                    service.startStreaming(session.fd, width, height, selectedFps) {
-                        runOnUiThread { updateUiSnapshot() }
+                    val width = wh.getOrNull(0)?.toIntOrNull() ?: return@mapNotNull null
+                    val height = wh.getOrNull(1)?.toIntOrNull() ?: return@mapNotNull null
+                    Triple(session, width to height, selectedFps)
+                }
+            if (targetSessions.isEmpty()) {
+                bulkStreamAction = null
+                updateUiSnapshot()
+                return@postDelayed
+            }
+            var remaining = targetSessions.size
+            targetSessions.forEach { (session, size, selectedFps) ->
+                service.startStreaming(session.fd, size.first, size.second, selectedFps) {
+                    runOnUiThread { updateUiSnapshot() }
+                    remaining -= 1
+                    if (remaining == 0) {
+                        runOnUiThread {
+                            bulkStreamAction = null
+                            updateUiSnapshot()
+                        }
                     }
                 }
+            }
         }, 450L)
     }
 
     private fun stopAllStreaming() {
+        if (bulkStreamAction != null) return
         val service = uvcService ?: return
-        service.sessionsByFd.values
+        val targetSessions = service.sessionsByFd.values
             .sortedBy { it.index }
             .filter { it.isStreaming }
-            .forEach { session ->
+        if (targetSessions.isEmpty()) return
+        bulkStreamAction = BulkStreamAction.Stopping
+        updateUiSnapshot()
+        var remaining = targetSessions.size
+        targetSessions.forEach { session ->
                 session.isPreviewEnabled = false
                 service.stopStreaming(session.fd) {
                     runOnUiThread {
                         if (selectedDeviceName == session.device.deviceName) {
                             uiState = uiState.copy(previewBitmap = null)
                         }
+                        remaining -= 1
+                        if (remaining == 0) {
+                            bulkStreamAction = null
+                        }
                         updateUiSnapshot()
                     }
                 }
-            }
+        }
     }
 
     private fun applyHttpPort() {

@@ -22,6 +22,11 @@ enum class CameraUiStatus(@param:StringRes val labelRes: Int) {
     Discovered(R.string.discovered_short)
 }
 
+enum class BulkStreamAction {
+    Starting,
+    Stopping
+}
+
 data class CameraNavItem(
     val deviceName: String,
     val title: String,
@@ -37,6 +42,8 @@ data class CameraDetailUi(
     val cameraIndex: Int?,
     val status: CameraUiStatus,
     val isStreaming: Boolean,
+    val isTransitioning: Boolean,
+    val isStopping: Boolean,
     val isPreviewEnabled: Boolean,
     val resolutionOptions: List<String>,
     val selectedResolutionIndex: Int,
@@ -63,6 +70,7 @@ data class MainUiState(
     val currentPortText: String = "8080",
     val connectedCount: Int = 0,
     val streamingCount: Int = 0,
+    val bulkStreamAction: BulkStreamAction? = null,
     val logLines: List<String> = emptyList()
 ) {
     val summaryMetrics: List<SummaryMetric>

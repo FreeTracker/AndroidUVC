@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -24,6 +25,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -37,6 +39,7 @@ import net.d7z.net.oss.uvc.ui.component.EventLogPanel
 import net.d7z.net.oss.uvc.ui.component.rememberStatusTone
 import net.d7z.net.oss.uvc.ui.component.StatusChip
 import net.d7z.net.oss.uvc.ui.component.SummaryCard
+import net.d7z.net.oss.uvc.ui.model.BulkStreamAction
 import net.d7z.net.oss.uvc.ui.model.MainUiCallbacks
 import net.d7z.net.oss.uvc.ui.model.MainUiState
 
@@ -121,19 +124,35 @@ fun HomeOverviewScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    val startingAll = state.bulkStreamAction == BulkStreamAction.Starting
+                    val stoppingAll = state.bulkStreamAction == BulkStreamAction.Stopping
                     FilledTonalButton(
                         onClick = callbacks.onStartAllStreaming,
                         modifier = Modifier.weight(1f),
-                        enabled = state.connectedCount > state.streamingCount
+                        enabled = state.connectedCount > state.streamingCount && state.bulkStreamAction == null
                     ) {
-                        Text(stringResource(R.string.start_all_streams))
+                        if (startingAll) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Text(stringResource(R.string.start_all_streams))
+                        }
                     }
                     OutlinedButton(
                         onClick = callbacks.onStopAllStreaming,
                         modifier = Modifier.weight(1f),
-                        enabled = state.streamingCount > 0
+                        enabled = state.streamingCount > 0 && state.bulkStreamAction == null
                     ) {
-                        Text(stringResource(R.string.stop_all_streams))
+                        if (stoppingAll) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Text(stringResource(R.string.stop_all_streams))
+                        }
                     }
                 }
                 if (state.cameraNavItems.isEmpty()) {

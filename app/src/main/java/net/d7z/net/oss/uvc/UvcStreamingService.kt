@@ -366,6 +366,8 @@ class UvcStreamingService : Service() {
                 return@Thread
             }
 
+            onSessionsChangedListener?.invoke()
+
             val (activeSession, started) = startStreamingWithRecovery(session, width, height, fps)
 
             synchronized(activeSession.stateLock) {
@@ -478,6 +480,8 @@ class UvcStreamingService : Service() {
                 onComplete?.invoke()
                 return@Thread
             }
+
+            onSessionsChangedListener?.invoke()
 
             stopUVC(fd)
             synchronized(session.stateLock) {

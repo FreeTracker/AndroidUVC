@@ -8,11 +8,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
@@ -101,7 +103,7 @@ fun CameraDetailScreen(
                     ExposedDropdownMenuBox(
                         expanded = resolutionMenuExpanded.value,
                         onExpandedChange = {
-                            if (!detail.isStreaming) {
+                            if (!detail.isStreaming && !detail.isTransitioning) {
                                 resolutionMenuExpanded.value = !resolutionMenuExpanded.value
                             }
                         },
@@ -111,14 +113,14 @@ fun CameraDetailScreen(
                             value = detail.resolutionOptions.getOrNull(detail.selectedResolutionIndex).orEmpty(),
                             onValueChange = {},
                             modifier = Modifier
-                                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled = !detail.isStreaming)
+                                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled = !detail.isStreaming && !detail.isTransitioning)
                                 .fillMaxWidth(),
                             label = { Text(stringResource(R.string.resolution_hint)) },
                             trailingIcon = {
                                 ExposedDropdownMenuDefaults.TrailingIcon(expanded = resolutionMenuExpanded.value)
                             },
                             readOnly = true,
-                            enabled = !detail.isStreaming
+                            enabled = !detail.isStreaming && !detail.isTransitioning
                         )
                         DropdownMenu(
                             expanded = resolutionMenuExpanded.value,
@@ -139,7 +141,7 @@ fun CameraDetailScreen(
                     ExposedDropdownMenuBox(
                         expanded = fpsMenuExpanded.value,
                         onExpandedChange = {
-                            if (!detail.isStreaming) {
+                            if (!detail.isStreaming && !detail.isTransitioning) {
                                 fpsMenuExpanded.value = !fpsMenuExpanded.value
                             }
                         },
@@ -149,14 +151,14 @@ fun CameraDetailScreen(
                             value = detail.fpsOptions.getOrNull(detail.selectedFpsIndex).orEmpty(),
                             onValueChange = {},
                             modifier = Modifier
-                                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled = !detail.isStreaming)
+                                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled = !detail.isStreaming && !detail.isTransitioning)
                                 .fillMaxWidth(),
                             label = { Text(stringResource(R.string.fps_hint)) },
                             trailingIcon = {
                                 ExposedDropdownMenuDefaults.TrailingIcon(expanded = fpsMenuExpanded.value)
                             },
                             readOnly = true,
-                            enabled = !detail.isStreaming
+                            enabled = !detail.isStreaming && !detail.isTransitioning
                         )
                         DropdownMenu(
                             expanded = fpsMenuExpanded.value,
@@ -182,9 +184,17 @@ fun CameraDetailScreen(
                 ) {
                     FilledTonalButton(
                         onClick = callbacks.onToggleStreaming,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !detail.isTransitioning
                     ) {
-                        Text(if (detail.isStreaming) stringResource(R.string.stop_stream) else stringResource(R.string.start_stream))
+                        if (detail.isTransitioning) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Text(if (detail.isStreaming) stringResource(R.string.stop_stream) else stringResource(R.string.start_stream))
+                        }
                     }
                 }
 
