@@ -40,6 +40,10 @@
 #include "libuvc/libuvc_internal.h"
 #include "errno.h"
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 #ifdef _MSC_VER
 
 #define DELTA_EPOCH_IN_MICROSECS  116444736000000000Ui64
@@ -610,12 +614,25 @@ uvc_error_t uvc_probe_stream_ctrl(
     uvc_device_handle_t *devh,
     uvc_stream_ctrl_t *ctrl) {
   uvc_stream_ctrl_t required_ctrl = *ctrl;
+  uvc_error_t ret;
 
-  uvc_query_stream_ctrl( devh, ctrl, 1, UVC_SET_CUR );
-  uvc_query_stream_ctrl( devh, ctrl, 1, UVC_GET_CUR );
+  ret = uvc_query_stream_ctrl( devh, ctrl, 1, UVC_SET_CUR );
+  if (ret != UVC_SUCCESS) {
+      __android_log_print(ANDROID_LOG_ERROR, "UVC_NATIVE", "uvc_query_stream_ctrl(UVC_SET_CUR) failed: %d", ret);
+      return ret;
+  }
+  
+  ret = uvc_query_stream_ctrl( devh, ctrl, 1, UVC_GET_CUR );
+  if (ret != UVC_SUCCESS) {
+      __android_log_print(ANDROID_LOG_ERROR, "UVC_NATIVE", "uvc_query_stream_ctrl(UVC_GET_CUR) failed: %d", ret);
+      return ret;
+  }
 
-  if(!_uvc_stream_params_negotiated(&required_ctrl, ctrl)) {
-    UVC_DEBUG("Unable to negotiate streaming format");
+  if (required_ctrl.bFormatIndex != ctrl->bFormatIndex ||
+      required_ctrl.bFrameIndex != ctrl->bFrameIndex) {
+    __android_log_print(ANDROID_LOG_ERROR, "UVC_NATIVE", "Unable to negotiate streaming format. Required: fmt=%d, frm=%d. Actual: fmt=%d, frm=%d",
+              required_ctrl.bFormatIndex, required_ctrl.bFrameIndex,
+              ctrl->bFormatIndex, ctrl->bFrameIndex);
     return UVC_ERROR_INVALID_MODE;
   }
 
