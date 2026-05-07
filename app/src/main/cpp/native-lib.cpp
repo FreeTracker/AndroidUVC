@@ -181,18 +181,41 @@ uvc_error_t negotiate_mjpeg_stream_ctrl(
     while (format_desc) {
         char fourcc[5] = {0};
         memcpy(fourcc, format_desc->fourccFormat, 4);
-        if (strcmp(fourcc, "MJPG") == 0) {
+        if (strcmp(fourcc, "MJPG") == 0 || strcmp(fourcc, "JPEG") == 0 || format_desc->bDescriptorSubtype == UVC_VS_FORMAT_MJPEG) {
             const uvc_frame_desc_t *frame_desc = format_desc->frame_descs;
             while (frame_desc) {
-                if (frame_desc->wWidth == width && frame_desc->wHeight == height && frame_desc->intervals) {
-                    for (uint32_t *interval = frame_desc->intervals; *interval; ++interval) {
-                        const auto current_fps = static_cast<int>(10000000 / *interval);
+                if (frame_desc->wWidth == width && frame_desc->wHeight == height) {
+                    if (frame_desc->intervals) {
+                        for (uint32_t *interval = frame_desc->intervals; *interval; ++interval) {
+                            const auto current_fps = static_cast<int>(10000000 / *interval);
+                            if (fps == 0 || current_fps == fps) {
+                                candidates.emplace_back(
+                                        format_desc->bFormatIndex,
+                                        frame_desc->bFrameIndex,
+                                        format_desc->parent->bInterfaceNumber,
+                                        *interval);
+                            }
+                        }
+                    } else if (frame_desc->dwMinFrameInterval > 0 && frame_desc->dwMaxFrameInterval > 0) {
+                        uint32_t step = frame_desc->dwFrameIntervalStep > 0 ? frame_desc->dwFrameIntervalStep : frame_desc->dwMinFrameInterval;
+                        for (uint32_t interval = frame_desc->dwMinFrameInterval; interval <= frame_desc->dwMaxFrameInterval; interval += step) {
+                            const auto current_fps = static_cast<int>(10000000 / interval);
+                            if (fps == 0 || current_fps == fps) {
+                                candidates.emplace_back(
+                                        format_desc->bFormatIndex,
+                                        frame_desc->bFrameIndex,
+                                        format_desc->parent->bInterfaceNumber,
+                                        interval);
+                            }
+                        }
+                    } else if (frame_desc->dwDefaultFrameInterval > 0) {
+                        const auto current_fps = static_cast<int>(10000000 / frame_desc->dwDefaultFrameInterval);
                         if (fps == 0 || current_fps == fps) {
                             candidates.emplace_back(
                                     format_desc->bFormatIndex,
                                     frame_desc->bFrameIndex,
                                     format_desc->parent->bInterfaceNumber,
-                                    *interval);
+                                    frame_desc->dwDefaultFrameInterval);
                         }
                     }
                 }
@@ -383,8 +406,9 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
         LOGE("Native[%d]: Failed to read USB device descriptor", fd);
     }
 
-    if (uvc_open_internal(ctx->dev, usb_handle, &ctx->devh) != UVC_SUCCESS) {
-        LOGE("uvc_open_internal failed for FD %d", fd);
+    uvc_error_t open_res = uvc_open_internal(ctx->dev, usb_handle, &ctx->devh);
+    if (open_res != UVC_SUCCESS) {
+        LOGE("uvc_open_internal failed for FD %d: %s (%d)", fd, uvc_strerror(open_res), open_res);
         ctx->cleanup(env); return env->NewStringUTF("");
     }
 
@@ -399,9 +423,9 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
     while (format_desc) {
         char fourcc[5] = {0};
         memcpy(fourcc, format_desc->fourccFormat, 4);
-        LOGI("Native[%d]: format index=%u fourcc=%s bpp=%u",
-             fd, format_desc->bFormatIndex, fourcc, format_desc->bBitsPerPixel);
-        if (strcmp(fourcc, "MJPG") == 0) {
+        LOGI("Native[%d]: format index=%u fourcc=%s bpp=%u subtype=%u",
+             fd, format_desc->bFormatIndex, fourcc, format_desc->bBitsPerPixel, format_desc->bDescriptorSubtype);
+        if (strcmp(fourcc, "MJPG") == 0 || strcmp(fourcc, "JPEG") == 0 || format_desc->bDescriptorSubtype == UVC_VS_FORMAT_MJPEG) {
             const uvc_frame_desc_t *frame_desc = format_desc->frame_descs;
             while (frame_desc) {
                 std::stringstream frame_log;
@@ -409,13 +433,35 @@ Java_net_d7z_net_oss_uvc_UvcStreamingService_getDeviceSupportedFormats(JNIEnv *e
                           << frame_desc->wWidth << "x" << frame_desc->wHeight << " fps=";
                 std::stringstream mode_ss;
                 mode_ss << frame_desc->wWidth << "x" << frame_desc->wHeight << ":";
+                bool has_fps = false;
                 if (frame_desc->intervals) {
                     for (uint32_t *interval = frame_desc->intervals; *interval; ++interval) {
                         const auto current_fps = (10000000 / *interval);
                         mode_ss << current_fps << ( (*(interval+1)) ? "," : "" );
                         frame_log << current_fps << ( (*(interval+1)) ? "," : "" );
+                        has_fps = true;
                     }
+                } else if (frame_desc->dwMinFrameInterval > 0 && frame_desc->dwMaxFrameInterval > 0) {
+                    uint32_t step = frame_desc->dwFrameIntervalStep > 0 ? frame_desc->dwFrameIntervalStep : frame_desc->dwMinFrameInterval;
+                    for (uint32_t interval = frame_desc->dwMinFrameInterval; interval <= frame_desc->dwMaxFrameInterval; interval += step) {
+                        const auto current_fps = (10000000 / interval);
+                        mode_ss << current_fps << ((interval + step <= frame_desc->dwMaxFrameInterval) ? "," : "");
+                        frame_log << current_fps << ((interval + step <= frame_desc->dwMaxFrameInterval) ? "," : "");
+                        has_fps = true;
+                    }
+                } else if (frame_desc->dwDefaultFrameInterval > 0) {
+                    const auto current_fps = (10000000 / frame_desc->dwDefaultFrameInterval);
+                    mode_ss << current_fps;
+                    frame_log << current_fps;
+                    has_fps = true;
                 }
+                
+                if (!has_fps) {
+                    // Fallback if no interval info is provided
+                    mode_ss << "30";
+                    frame_log << "30(fallback)";
+                }
+
                 LOGI("%s", frame_log.str().c_str());
                 const auto mode = mode_ss.str();
                 if (seen_modes.insert(mode).second) {
